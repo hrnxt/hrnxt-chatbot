@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+openai
+chromadb
+requests
+beautifulsoup4
+pandas
