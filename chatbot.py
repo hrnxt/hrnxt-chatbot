@@ -22,6 +22,35 @@ from bs4 import BeautifulSoup
 from chromadb.utils import embedding_functions
 import html2text
 
+import threading
+import traceback
+
+INDEX_READY = False
+INDEX_ERROR = None
+_INDEX_THREAD_STARTED = False
+
+def start_indexing_background():
+    global INDEX_READY, INDEX_ERROR, _INDEX_THREAD_STARTED
+
+    if _INDEX_THREAD_STARTED:
+        return
+    _INDEX_THREAD_STARTED = True
+
+    def _run():
+        global INDEX_READY, INDEX_ERROR
+        try:
+            # This is your existing function that downloads zips + embeds + upserts
+            build_or_update_indexes()
+            INDEX_READY = True
+            print("[INFO] Indexing complete. INDEX_READY=True")
+        except Exception as e:
+            INDEX_ERROR = f"{type(e).__name__}: {e}"
+            print("[ERROR] Indexing failed:", INDEX_ERROR)
+            print(traceback.format_exc())
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
 
 # ----------------------------
 # Config (from notebook)
