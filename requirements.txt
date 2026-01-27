@@ -2,8 +2,8 @@ fastapi
 uvicorn
 pydantic
 
-openai>=1.40.0
-chromadb<=0.5.23
+openai==1.40.6
+chromadb==0.5.23
 tiktoken
 tokenizers<=0.20.3
 httpx<0.28.0
