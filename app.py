@@ -7,6 +7,12 @@ app = FastAPI()
 class Question(BaseModel):
     question: str
 
+from fastapi import HTTPException
+
 @app.post("/chat")
 def chat(q: Question):
-    return generate_answer(q.question)
+    try:
+        return generate_answer(q.question)
+    except RuntimeError as e:
+        # Friendly error for cases like “OpenAI quota exceeded” during indexing
+        raise HTTPException(status_code=503, detail=str(e))
