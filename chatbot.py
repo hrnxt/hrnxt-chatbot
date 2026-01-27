@@ -1,5 +1,5 @@
 # chatbot.py
-# FAST MODE optimized version — FIXED indexing lifecycle
+# FAST MODE optimized version — FIXED indexing lifecycle + SAFE EMBEDDING BATCHING
 
 import os, io, re, hashlib, zipfile, urllib.parse, requests, logging
 from typing import List, Dict, Any
@@ -37,7 +37,6 @@ _INDEX_THREAD_STARTED = False
 # ----------------------------
 
 OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
-SERPER_API_KEY = (os.environ.get("SERPER_API_KEY") or "").strip()
 
 CHAT_MODEL = os.environ.get("CHAT_MODEL", "gpt-4o-mini")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
@@ -48,8 +47,10 @@ DROPBOX_EXTERNAL_URL = (os.environ.get("DROPBOX_EXTERNAL_URL") or "").strip()
 # FAST MODE tuning
 MAX_KB_HITS = 3
 MAX_CHARS_PER_CHUNK = 800
-MIN_KB_HITS_FOR_NO_WEB = 2
 ANSWER_CACHE_MAX = 200
+
+# Embedding safety
+UPSERT_BATCH_SIZE = 64   # critical fix
 
 # ----------------------------
 # Clients
@@ -73,8 +74,12 @@ except Exception:
 # Collections
 # ----------------------------
 
-kb_col = chroma_client.get_or_create_collection("dropbox_kb", embedding_function=openai_ef)
-external_col = chroma_client.get_or_create_collection("dropbox_external", embedding_function=openai_ef)
+kb_col = chroma_client.get_or_create_collection(
+    "dropbox_kb", embedding_function=openai_ef
+)
+external_col = chroma_client.get_or_create_collection(
+    "dropbox_external", embedding_function=openai_ef
+)
 
 # ----------------------------
 # Helpers
@@ -82,9 +87,12 @@ external_col = chroma_client.get_or_create_collection("dropbox_external", embedd
 
 _enc = tiktoken.get_encoding("cl100k_base")
 
-def _chunk_text(text: str, max_tokens: int = 900) -> List[str]:
+def _chunk_text(text: str, max_tokens: int = 700) -> List[str]:
     toks = _enc.encode(text or "")
-    return [_enc.decode(toks[i:i + max_tokens]) for i in range(0, len(toks), max_tokens)]
+    return [
+        _enc.decode(toks[i:i + max_tokens])
+        for i in range(0, len(toks), max_tokens)
+    ]
 
 def _hash(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8", errors="ignore")).hexdigest()
@@ -106,7 +114,10 @@ def _download_dropbox_zip(url: str) -> bytes:
 
 def _read_pdf(b: bytes) -> str:
     try:
-        return "\n".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(b)).pages)
+        return "\n".join(
+            p.extract_text() or ""
+            for p in PdfReader(io.BytesIO(b)).pages
+        )
     except Exception:
         return ""
 
@@ -120,27 +131,36 @@ def _extract_zip(zip_bytes: bytes) -> List[Dict[str, Any]]:
             continue
         raw = zf.read(info)
         name = info.filename
-        text = _read_pdf(raw) if name.lower().endswith(".pdf") else raw.decode("utf-8", "ignore")
+        text = (
+            _read_pdf(raw)
+            if name.lower().endswith(".pdf")
+            else raw.decode("utf-8", "ignore")
+        )
         if text.strip():
             docs.append({"name": name, "text": text})
     return docs
 
+# ----------------------------
+# SAFE BATCHED UPSERT (FIX)
+# ----------------------------
+
 def _safe_upsert(col, docs, ns):
     ids, texts, metas = [], [], []
+
     for d in docs:
         for i, c in enumerate(_chunk_text(d["text"])):
             ids.append(_hash(f"{ns}:{d['name']}:{i}"))
             texts.append(c)
             metas.append({"source": d["name"], "chunk": i})
 
-    if not ids:
-        return
+            # Flush batch
+            if len(ids) >= UPSERT_BATCH_SIZE:
+                col.upsert(ids=ids, documents=texts, metadatas=metas)
+                ids, texts, metas = [], [], []
 
-    try:
+    # Final flush
+    if ids:
         col.upsert(ids=ids, documents=texts, metadatas=metas)
-    except Exception as e:
-        print(f"[ERROR] Chroma upsert failed ({ns}): {repr(e)}")
-        raise RuntimeError("Indexing failed during embedding (OpenAI or quota issue).")
 
 def build_or_update_indexes():
     print(f"Chroma mode: {chroma_mode}")
@@ -156,7 +176,7 @@ def build_or_update_indexes():
         _safe_upsert(external_col, ex_docs, "external")
 
 # ----------------------------
-# Background indexing (FIXED)
+# Background indexing
 # ----------------------------
 
 def start_indexing_background():
