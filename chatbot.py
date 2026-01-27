@@ -1,24 +1,27 @@
 # chatbot.py
-# FAST MODE optimized version
+# FAST MODE optimized version — FIXED indexing lifecycle
 
-import os, io, re, hashlib, zipfile, urllib.parse, requests, logging, json
+import os, io, re, hashlib, zipfile, urllib.parse, requests, logging
 from typing import List, Dict, Any
 import threading, traceback
 
-import pandas as pd
+# ----------------------------
+# Telemetry + logging
+# ----------------------------
 
-# Chroma telemetry off before import
 os.environ["CHROMA_TELEMETRY_IMPLEMENTATION"] = "none"
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
 logging.getLogger("chromadb.telemetry").setLevel(logging.CRITICAL)
 logging.getLogger("chromadb").setLevel(logging.WARNING)
 
+# ----------------------------
+# Imports
+# ----------------------------
+
 import chromadb
 import tiktoken
 from openai import OpenAI
 from pypdf import PdfReader
-from docx import Document
-from bs4 import BeautifulSoup
 from chromadb.utils import embedding_functions
 
 # ----------------------------
@@ -29,38 +32,6 @@ INDEX_READY = False
 INDEX_ERROR = None
 _INDEX_THREAD_STARTED = False
 
-def start_indexing_background():
-    global INDEX_READY, INDEX_ERROR, _INDEX_THREAD_STARTED
-    if _INDEX_THREAD_STARTED:
-        return
-    _INDEX_THREAD_STARTED = True
-
-def _safe_upsert(col, ids, texts, metas, namespace: str):
-    if not ids:
-        return
-    try:
-        col.upsert(ids=ids, documents=texts, metadatas=metas)
-    except Exception as e:
-        print(f"[ERROR] Chroma upsert failed for namespace='{namespace}': {repr(e)}")
-        # Do NOT re-raise OpenAI / Chroma internal exceptions
-        raise RuntimeError(
-            "Indexing failed while embedding documents. "
-            "This is usually due to an OpenAI API or quota issue."
-        )
-
-    def _run():
-        global INDEX_READY, INDEX_ERROR
-        try:
-            build_or_update_indexes()
-            INDEX_READY = True
-            print("[INFO] Indexing complete. INDEX_READY=True")
-        except Exception as e:
-            INDEX_ERROR = f"{type(e).__name__}: {e}"
-            print("[ERROR] Indexing failed:", INDEX_ERROR)
-            print(traceback.format_exc())
-
-    threading.Thread(target=_run, daemon=True).start()
-
 # ----------------------------
 # Config
 # ----------------------------
@@ -70,6 +41,9 @@ SERPER_API_KEY = (os.environ.get("SERPER_API_KEY") or "").strip()
 
 CHAT_MODEL = os.environ.get("CHAT_MODEL", "gpt-4o-mini")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
+
+DROPBOX_KB_URL = (os.environ.get("DROPBOX_KB_URL") or "").strip()
+DROPBOX_EXTERNAL_URL = (os.environ.get("DROPBOX_EXTERNAL_URL") or "").strip()
 
 # FAST MODE tuning
 MAX_KB_HITS = 3
@@ -85,7 +59,7 @@ client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 openai_ef = embedding_functions.OpenAIEmbeddingFunction(
     api_key=OPENAI_API_KEY,
-    model_name=EMBEDDING_MODEL
+    model_name=EMBEDDING_MODEL,
 )
 
 try:
@@ -99,13 +73,8 @@ except Exception:
 # Collections
 # ----------------------------
 
-KB_COLLECTION_NAME = "dropbox_kb"
-STYLE_COLLECTION_NAME = "dropbox_style"
-EXTERNAL_COLLECTION_NAME = "dropbox_external"
-
-kb_col = chroma_client.get_or_create_collection(KB_COLLECTION_NAME, embedding_function=openai_ef)
-style_col = chroma_client.get_or_create_collection(STYLE_COLLECTION_NAME, embedding_function=openai_ef)
-external_col = chroma_client.get_or_create_collection(EXTERNAL_COLLECTION_NAME, embedding_function=openai_ef)
+kb_col = chroma_client.get_or_create_collection("dropbox_kb", embedding_function=openai_ef)
+external_col = chroma_client.get_or_create_collection("dropbox_external", embedding_function=openai_ef)
 
 # ----------------------------
 # Helpers
@@ -115,7 +84,7 @@ _enc = tiktoken.get_encoding("cl100k_base")
 
 def _chunk_text(text: str, max_tokens: int = 900) -> List[str]:
     toks = _enc.encode(text or "")
-    return [_enc.decode(toks[i:i+max_tokens]) for i in range(0, len(toks), max_tokens)]
+    return [_enc.decode(toks[i:i + max_tokens]) for i in range(0, len(toks), max_tokens)]
 
 def _hash(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8", errors="ignore")).hexdigest()
@@ -123,9 +92,6 @@ def _hash(s: str) -> str:
 # ----------------------------
 # Dropbox indexing
 # ----------------------------
-
-DROPBOX_KB_URL = (os.environ.get("DROPBOX_KB_URL") or "").strip()
-DROPBOX_EXTERNAL_URL = (os.environ.get("DROPBOX_EXTERNAL_URL") or "").strip()
 
 def _download_dropbox_zip(url: str) -> bytes:
     if not url:
@@ -159,7 +125,7 @@ def _extract_zip(zip_bytes: bytes) -> List[Dict[str, Any]]:
             docs.append({"name": name, "text": text})
     return docs
 
-def _upsert(col, docs, ns):
+def _safe_upsert(col, docs, ns):
     ids, texts, metas = [], [], []
     for d in docs:
         for i, c in enumerate(_chunk_text(d["text"])):
@@ -167,7 +133,14 @@ def _upsert(col, docs, ns):
             texts.append(c)
             metas.append({"source": d["name"], "chunk": i})
 
-    _safe_upsert(col, ids, texts, metas, ns)
+    if not ids:
+        return
+
+    try:
+        col.upsert(ids=ids, documents=texts, metadatas=metas)
+    except Exception as e:
+        print(f"[ERROR] Chroma upsert failed ({ns}): {repr(e)}")
+        raise RuntimeError("Indexing failed during embedding (OpenAI or quota issue).")
 
 def build_or_update_indexes():
     print(f"Chroma mode: {chroma_mode}")
@@ -175,12 +148,36 @@ def build_or_update_indexes():
     if DROPBOX_KB_URL:
         kb_docs = _extract_zip(_download_dropbox_zip(DROPBOX_KB_URL))
         print(f"KB docs parsed: {len(kb_docs)}")
-        _upsert(kb_col, kb_docs, "kb")
+        _safe_upsert(kb_col, kb_docs, "kb")
 
     if DROPBOX_EXTERNAL_URL:
         ex_docs = _extract_zip(_download_dropbox_zip(DROPBOX_EXTERNAL_URL))
         print(f"External docs parsed: {len(ex_docs)}")
-        _upsert(external_col, ex_docs, "external")
+        _safe_upsert(external_col, ex_docs, "external")
+
+# ----------------------------
+# Background indexing (FIXED)
+# ----------------------------
+
+def start_indexing_background():
+    global INDEX_READY, INDEX_ERROR, _INDEX_THREAD_STARTED
+
+    if _INDEX_THREAD_STARTED:
+        return
+    _INDEX_THREAD_STARTED = True
+
+    def _run():
+        global INDEX_READY, INDEX_ERROR
+        try:
+            build_or_update_indexes()
+            INDEX_READY = True
+            print("[INFO] Indexing complete. INDEX_READY=True")
+        except Exception as e:
+            INDEX_ERROR = f"{type(e).__name__}: {e}"
+            print("[ERROR] Indexing failed:", INDEX_ERROR)
+            print(traceback.format_exc())
+
+    threading.Thread(target=_run, daemon=True).start()
 
 # ----------------------------
 # Retrieval
@@ -194,22 +191,6 @@ def retrieve_kb(q: str) -> List[Dict[str, Any]]:
         {"text": d[:MAX_CHARS_PER_CHUNK], "meta": m}
         for d, m in zip(docs, metas)
     ]
-
-# ----------------------------
-# Web (Serper) – conditional
-# ----------------------------
-
-def _serper_search(q: str, num: int = 5):
-    if not SERPER_API_KEY:
-        return []
-    r = requests.post(
-        "https://google.serper.dev/search",
-        headers={"X-API-KEY": SERPER_API_KEY},
-        json={"q": q, "num": num},
-        timeout=20,
-    )
-    r.raise_for_status()
-    return r.json().get("organic", [])
 
 # ----------------------------
 # Answer cache
@@ -227,12 +208,6 @@ def generate_answer(question: str) -> Dict[str, Any]:
         return ANSWER_CACHE[qkey]
 
     kb_hits = retrieve_kb(question)
-
-    # Only do web search if KB is weak
-    web_domain_snips = []
-    if len(kb_hits) < MIN_KB_HITS_FOR_NO_WEB:
-        web_domain_snips = _serper_search(question, num=5)
-
     kb_context = "\n\n".join(h["text"] for h in kb_hits)
 
     system = (
@@ -269,14 +244,7 @@ HRNXT context:
             }
             for h in kb_hits
         ],
-        "web_domain_snippets": [
-            {
-                "url": w.get("link"),
-                "domain": urllib.parse.urlparse(w.get("link") or "").netloc,
-                "snippet": w.get("snippet"),
-            }
-            for w in web_domain_snips
-        ],
+        "web_domain_snippets": [],
         "web_people_snippets": [],
         "g_tags": [],
     }
