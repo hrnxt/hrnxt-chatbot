@@ -19,6 +19,7 @@ from openai import OpenAI
 from pypdf import PdfReader
 from docx import Document
 from bs4 import BeautifulSoup
+from chromadb.utils import embedding_functions
 import html2text
 
 
@@ -29,6 +30,13 @@ import html2text
 # Secrets from environment (NO prompting in production)
 OPENAI_API_KEY = (os.environ.get("OPENAI_API_KEY") or "").strip()
 SERPER_API_KEY = (os.environ.get("SERPER_API_KEY") or "").strip()
+
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
+openai_ef = embedding_functions.OpenAIEmbeddingFunction(
+    api_key=OPENAI_API_KEY,
+    model_name=EMBEDDING_MODEL
+)
+
 
 # Collections
 KB_COLLECTION_NAME       = "dropbox_kb"
@@ -207,9 +215,9 @@ def _extract_zip_to_docs(zip_bytes: bytes) -> List[Dict[str, Any]]:
 
 def _get_or_create_collection(name: str):
     try:
-        return chroma_client.get_collection(name)
+        return chroma_client.get_collection(name, embedding_function=openai_ef)
     except Exception:
-        return chroma_client.create_collection(name)
+        return chroma_client.create_collection(name, embedding_function=openai_ef)
 
 
 kb_col       = _get_or_create_collection(KB_COLLECTION_NAME)
