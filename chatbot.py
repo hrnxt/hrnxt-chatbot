@@ -35,6 +35,19 @@ def start_indexing_background():
         return
     _INDEX_THREAD_STARTED = True
 
+def _safe_upsert(col, ids, texts, metas, namespace: str):
+    if not ids:
+        return
+    try:
+        col.upsert(ids=ids, documents=texts, metadatas=metas)
+    except Exception as e:
+        print(f"[ERROR] Chroma upsert failed for namespace='{namespace}': {repr(e)}")
+        # Do NOT re-raise OpenAI / Chroma internal exceptions
+        raise RuntimeError(
+            "Indexing failed while embedding documents. "
+            "This is usually due to an OpenAI API or quota issue."
+        )
+
     def _run():
         global INDEX_READY, INDEX_ERROR
         try:
@@ -153,8 +166,8 @@ def _upsert(col, docs, ns):
             ids.append(_hash(f"{ns}:{d['name']}:{i}"))
             texts.append(c)
             metas.append({"source": d["name"], "chunk": i})
-    if ids:
-        col.upsert(ids=ids, documents=texts, metadatas=metas)
+
+    _safe_upsert(col, ids, texts, metas, ns)
 
 def build_or_update_indexes():
     print(f"Chroma mode: {chroma_mode}")
