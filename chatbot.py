@@ -239,8 +239,24 @@ def _upsert_docs(col, docs: List[Dict[str, Any]], namespace: str):
             ids.append(cid)
             texts.append(chunk)
             metas.append({"source": name, "chunk": idx, "ns": namespace})
-    if ids:
+
+    if not ids:
+        return
+
+    try:
         col.upsert(ids=ids, documents=texts, metadatas=metas)
+    except Exception as e:
+        # Don’t crash the whole app if embedding/upsert fails (e.g., OpenAI 429 quota)
+        # This will show up in Render -> Logs -> Application logs
+        print(f"[ERROR] Chroma upsert failed for namespace='{namespace}' with {len(ids)} chunks: {repr(e)}")
+
+        # Raise a simple RuntimeError so upstream code can handle it cleanly
+        # (avoids Chroma/OpenAI wrapper TypeErrors)
+        raise RuntimeError(
+            "Indexing failed while embedding documents. "
+            "Most commonly this is due to OpenAI API quota/billing (HTTP 429). "
+            "Check OpenAI Billing / project limits, then redeploy and retry."
+        ) from e
 
 
 _INDEXED_ONCE = False
