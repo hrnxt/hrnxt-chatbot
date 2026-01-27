@@ -1,9 +1,20 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
 import chatbot  # IMPORTANT: import the module, not individual variables
 
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://hrnxt.co",
+        "https://www.hrnxt.co",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class Question(BaseModel):
     question: str
