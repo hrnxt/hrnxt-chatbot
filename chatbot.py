@@ -274,3 +274,95 @@ HRNXT context:
     ANSWER_CACHE[qkey] = result
 
     return result
+
+def generate_answer_from_messages(messages: List[Dict[str, str]]) -> Dict[str, Any]:
+    clean_messages = [
+        m for m in messages
+        if m.get("role") in ("user", "assistant") and m.get("content")
+    ]
+
+    if not clean_messages:
+        return generate_answer("")
+
+    latest_question = clean_messages[-1]["content"]
+
+    # Build a better retrieval query for follow-up questions
+    recent_context = "\n".join(
+        f"{m['role']}: {m['content']}"
+        for m in clean_messages[-6:]
+    )
+
+    retrieval_prompt = (
+        "Rewrite the user's latest question as a standalone search query for HR research. "
+        "Use the conversation context to resolve references like 'these', 'that', or 'it'. "
+        "Return only the rewritten search query.\n\n"
+        f"Conversation:\n{recent_context}\n\n"
+        f"Latest question:\n{latest_question}"
+    )
+
+    try:
+        rewrite_resp = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You rewrite follow-up questions into concise standalone search queries."
+                },
+                {
+                    "role": "user",
+                    "content": retrieval_prompt
+                },
+            ],
+            temperature=0,
+        )
+
+        retrieval_query = (
+            rewrite_resp.choices[0].message.content or latest_question
+        ).strip()
+
+    except Exception:
+        retrieval_query = latest_question
+
+    kb_hits = retrieve_kb(retrieval_query)
+    kb_context = "\n\n".join(h["text"] for h in kb_hits)
+
+    system = (
+        "You are Ask Mike, the HRNXT executive assistant. "
+        "Be concise, practical, and grounded in HRNXT research. "
+        "You are having a continuing conversation, so use prior messages for context. "
+        "If the user asks a follow-up like 'which of these' or 'tell me more,' infer what they mean from the conversation history."
+    )
+
+    conversation_messages = clean_messages[-8:]
+
+    openai_messages = [
+        {"role": "system", "content": system},
+        {
+            "role": "user",
+            "content": f"Relevant HRNXT context for the latest question:\n{kb_context}"
+        },
+    ] + conversation_messages
+
+    resp = client.chat.completions.create(
+        model=CHAT_MODEL,
+        messages=openai_messages,
+        temperature=0.2,
+    )
+
+    answer_text = (resp.choices[0].message.content or "").strip()
+
+    return {
+        "answer": answer_text,
+        "kb_hits": [
+            {
+                "source": h["meta"].get("source"),
+                "chunk": h["meta"].get("chunk"),
+                "text": h["text"][:500],
+            }
+            for h in kb_hits
+        ],
+        "retrieval_query": retrieval_query,
+        "web_domain_snippets": [],
+        "web_people_snippets": [],
+        "g_tags": [],
+    }
