@@ -1,6 +1,6 @@
 # chatbot.py
 # HRNXT Ask Mike
-# Knowledge-base upgrade:
+# Knowledge-base + research-grounded generation upgrade:
 # - PDF + DOCX + XLSX + text-file ingestion
 # - source-type metadata
 # - more useful/diversified retrieval context
@@ -233,10 +233,28 @@ Depth and judgment:
 Use of evidence and HRNXT context:
 
 - Ground the answer in supplied HRNXT/Executive Networks research when it is relevant.
+- Retrieved research is not decorative background. When the retrieved context
+  contains directly relevant evidence, it should materially shape at least one
+  central judgment, implication, boundary condition, risk, or recommendation.
+- Before drafting, silently ask: "What does this retrieved evidence change,
+  sharpen, complicate, or make more specific about the obvious answer?"
+  Build the answer around that difference when there is one.
+- Look especially for non-obvious findings, empirical results, tensions,
+  exceptions, implementation conditions, adoption barriers, governance
+  implications, or second-order effects in the retrieved material.
+- Do not merely sprinkle research terms, statistics, or named concepts into
+  an otherwise generic answer. Translate evidence into an executive implication:
+  what should the leader decide, prioritize, avoid, sequence, or test differently?
+- If the retrieved evidence supports a more precise recommendation than your
+  general knowledge would, prefer the evidence-grounded recommendation.
+- If multiple retrieved sources point in different directions, surface the
+  tension rather than averaging them into generic advice.
 - Do not force retrieved material into the answer if it is weakly related.
+  If none of the supplied context materially improves the answer, rely on
+  sound general reasoning and do not pretend the research said more than it did.
 - Never claim the supplied context says something it does not.
 - If the evidence is limited, be appropriately cautious rather than inventing support.
-- Synthesize research into judgment rather than merely repeating it.
+- Synthesize research into judgment rather than merely repeating or summarizing it.
 - Material identified as "thought_leadership" may contain curated names,
   books, articles, and citations rather than the full underlying works.
   Treat that material as a map to relevant thinkers and ideas, not as proof
@@ -1720,6 +1738,24 @@ def generate_answer(
     )
 
 
+    source_types = {}
+    for hit in kb_hits:
+        source_type = (
+            hit.get("meta", {})
+            .get("source_type", "knowledge_base")
+        )
+        source_types[source_type] = (
+            source_types.get(source_type, 0)
+            + 1
+        )
+
+    print(
+        f"[GROUNDING] hits={len(kb_hits)} "
+        f"context_chars={len(kb_context)} "
+        f"source_types={source_types}"
+    )
+
+
     user_prompt = f"""
 Question:
 {question}
@@ -1727,8 +1763,14 @@ Question:
 Relevant HRNXT / Executive Networks research context:
 {kb_context}
 
-Use the context when it genuinely helps answer the question.
-Do not force weakly related material into the answer.
+Research-grounding instruction:
+When this context contains directly relevant evidence, use it to materially
+sharpen the answer. Do not give the same generic answer you would have given
+without the research and then merely add a statistic or research term.
+Translate the strongest relevant evidence into a more specific executive
+judgment, tradeoff, boundary condition, risk, or recommendation.
+
+If the retrieved material is only weakly related, do not force it into the answer.
 """
 
 
@@ -1949,6 +1991,24 @@ def generate_answer_from_messages(
     )
 
 
+    source_types = {}
+    for hit in kb_hits:
+        source_type = (
+            hit.get("meta", {})
+            .get("source_type", "knowledge_base")
+        )
+        source_types[source_type] = (
+            source_types.get(source_type, 0)
+            + 1
+        )
+
+    print(
+        f"[GROUNDING] followup_hits={len(kb_hits)} "
+        f"context_chars={len(kb_context)} "
+        f"source_types={source_types}"
+    )
+
+
     # Keep a reasonable amount of history.
     conversation_messages = (
         clean_messages[-8:]
@@ -1980,9 +2040,13 @@ def generate_answer_from_messages(
                     "Relevant HRNXT / Executive Networks "
                     "research context for the latest question:\n"
                     f"{kb_context}\n\n"
-                    "Use the context when it genuinely helps. "
-                    "Do not force weakly related material "
-                    "into the answer."
+                    "Research-grounding instruction: when this context "
+                    "contains directly relevant evidence, use it to materially "
+                    "sharpen the answer rather than giving a generic answer "
+                    "and merely adding a research term or statistic. Translate "
+                    "the strongest evidence into a more specific judgment, "
+                    "tradeoff, boundary condition, risk, or recommendation. "
+                    "If the material is weakly related, do not force it in."
                 ),
         },
     ] + conversation_messages
