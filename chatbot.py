@@ -1,6 +1,6 @@
 # chatbot.py
 # HRNXT Ask Mike
-# Knowledge-base + research-grounded generation + evidence-level chunking (Mike research set):
+# Knowledge-base + evidence-disciplined generation + evidence-level chunking (Mike research set):
 # - PDF + DOCX + XLSX + text-file ingestion
 # - source-type metadata
 # - more useful/diversified retrieval context
@@ -264,9 +264,39 @@ Use of evidence and HRNXT context:
 - Do not attribute a specific finding, statistic, conclusion, or quotation
   to an underlying work unless that finding is actually present in the
   supplied retrieved context.
-- When retrieved research contains a useful source name or study, you may
-  identify it briefly, but the answer should remain advisory rather than
-  becoming a literature review.
+- When retrieved research contains a useful source name or study, use the
+  underlying insight to sharpen the advice, but keep the answer advisory rather
+  than turning it into a literature review.
+
+Evidence discipline and freshness:
+
+- Treat the static knowledge base primarily as a source of durable insights,
+  patterns, tensions, frameworks, and implications, not as a source of
+  automatically current statistics.
+- Do not volunteer precise statistics, percentages, dates, market-size figures,
+  forecasts, regulatory details, or other time-sensitive factual claims from
+  the static research unless the user explicitly asks for evidence, data,
+  citations, sources, or a research-based answer.
+- When a useful research finding contains a number, usually translate it into
+  the durable implication rather than quoting the number. For example, say
+  that gains were substantially larger for less-experienced workers rather
+  than automatically repeating a specific percentage.
+- If the user explicitly asks for statistics or evidence from the supplied
+  research, you may provide them, but make clear that they come from the
+  retrieved research and may not represent the latest available data.
+- Distinguish direct evidence from analogy. A measured effect in one function,
+  occupation, company, geography, or use case does not prove the same effect
+  in another.
+- When generalizing from adjacent evidence, identify the transferable principle
+  and avoid presenting the new application as directly proven.
+- When the user asks "where", "which", "most likely", "what first", or a similar
+  prioritization question, first infer the characteristics of the tasks or
+  situations that the evidence supports, then use those characteristics to
+  prioritize HR applications. Do not jump directly to a familiar HR use case
+  merely because it is commonly associated with the topic.
+- Prefer recommendations supported by the strongest and most directly relevant
+  retrieved evidence. Where evidence is indirect, say so through appropriately
+  cautious wording rather than overstating certainty.
 
 For strategic questions, favor this general pattern when appropriate:
 1. State the central judgment.
@@ -1780,6 +1810,16 @@ Research-grounding instruction:
 When this context contains directly relevant evidence, use it to materially
 sharpen the answer. Do not give the same generic answer you would have given
 without the research and then merely add a statistic or research term.
+
+Prefer the durable implication of the evidence over quoting precise numbers
+from this static knowledge base. Distinguish direct evidence from analogy:
+if a finding comes from an adjacent role or use case, transfer only the
+principle that is actually supported.
+
+For prioritization questions such as where, which, most likely, or what first,
+identify the characteristics of the tasks or situations supported by the
+evidence before naming specific HR applications.
+
 Translate the strongest relevant evidence into a more specific executive
 judgment, tradeoff, boundary condition, risk, or recommendation.
 
@@ -2055,9 +2095,13 @@ def generate_answer_from_messages(
                     f"{kb_context}\n\n"
                     "Research-grounding instruction: when this context "
                     "contains directly relevant evidence, use it to materially "
-                    "sharpen the answer rather than giving a generic answer "
-                    "and merely adding a research term or statistic. Translate "
-                    "the strongest evidence into a more specific judgment, "
+                    "sharpen the answer rather than giving a generic answer. "
+                    "Prefer durable implications over precise statistics from "
+                    "this static knowledge base. Distinguish direct evidence "
+                    "from analogy, and transfer only principles actually supported. "
+                    "For prioritization questions, identify the characteristics "
+                    "supported by the evidence before naming HR applications. "
+                    "Translate the strongest evidence into a more specific judgment, "
                     "tradeoff, boundary condition, risk, or recommendation. "
                     "If the material is weakly related, do not force it in."
                 ),
