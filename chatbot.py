@@ -1,6 +1,6 @@
 # chatbot.py
 # HRNXT Ask Mike
-# Knowledge-base + research-grounded generation + evidence-level chunking upgrade:
+# Knowledge-base + research-grounded generation + evidence-level chunking (Mike research set):
 # - PDF + DOCX + XLSX + text-file ingestion
 # - source-type metadata
 # - more useful/diversified retrieval context
@@ -1028,7 +1028,8 @@ def build_or_update_indexes():
         "chunk_tokens=400 "
         f"max_hits={MAX_KB_HITS} "
         f"max_chars_per_chunk={MAX_CHARS_PER_CHUNK} "
-        f"max_context_chars={MAX_CONTEXT_CHARS}"
+        f"max_context_chars={MAX_CONTEXT_CHARS} "
+        "mode=natural_semantic"
     )
 
 
