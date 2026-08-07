@@ -1,6 +1,6 @@
 # chatbot.py
 # HRNXT Ask Mike
-# Ask Mike V12: independent answer first + conservative research revision
+# Ask Mike V13: contextualized answering + answer-first direct research review
 # - PDF + DOCX + XLSX + text-file ingestion
 # - source-type metadata
 # - more useful/diversified retrieval context
@@ -2414,6 +2414,138 @@ Return only the final answer to the user.
     return final_answer
 
 
+
+def _revise_draft_with_retrieved_context(
+    answering_question: str,
+    draft: str,
+    kb_hits: List[Dict[str, Any]]
+) -> str:
+    """
+    One conservative research-review pass using retrieved excerpts directly.
+
+    The answering model has already formed its judgment. The retrieved material
+    is allowed to correct, qualify, or sharpen that judgment, but not redirect it.
+    This removes the separate research-synthesis model call from the live path.
+    """
+
+    if not kb_hits:
+        print(
+            "[RESEARCH REVIEW] "
+            "No retrieved research; keeping independent draft"
+        )
+        return draft
+
+    research_context = _build_grounding_context(
+        kb_hits
+    )
+
+    if not research_context.strip():
+        print(
+            "[RESEARCH REVIEW] "
+            "Empty research context; keeping independent draft"
+        )
+        return draft
+
+    allow_specifics = (
+        _question_requests_evidence(
+            answering_question
+        )
+    )
+
+    if allow_specifics:
+        specificity_rule = (
+            "The user explicitly asked for evidence/data/sources. "
+            "You may use specific evidence that is actually present in the excerpts, "
+            "but do not invent or overstate it."
+        )
+    else:
+        specificity_rule = (
+            "Do not add precise statistics, dates, forecasts, named studies, citation "
+            "names, named laws, or regulatory details. Convert useful research into "
+            "durable qualitative implications."
+        )
+
+    prompt = f"""
+Question to answer:
+{answering_question}
+
+Ask Mike's independent draft:
+{draft}
+
+Retrieved research excerpts:
+{research_context}
+
+Review the independent draft against the retrieved research.
+
+IMPORTANT:
+- The independent draft is the starting judgment.
+- Research is supporting material, not an answer key.
+- Keep the draft unchanged if the excerpts do not materially improve it.
+- Ignore research that is merely adjacent, interesting, or less responsive to the
+  actual question than the draft.
+- Do not introduce a new topic simply because it appears in retrieval.
+- For a question presenting a tension, preserve both the strongest case and the
+  strongest limitation before landing on a judgment.
+- For "which", "what first", "most important", or "what would you do" questions,
+  make a clear choice.
+- Revise only to correct an unsupported assumption, add an important counterargument
+  or boundary condition, sharpen a recommendation, or add a durable insight that
+  materially changes what the executive should conclude.
+- Preserve useful specificity and executive judgment from the draft.
+- Do not make the answer longer unless the added material genuinely improves it.
+- {specificity_rule}
+
+Return only the final answer to the user.
+"""
+
+    started = time.perf_counter()
+
+    response = (
+        client
+        .chat.completions
+        .create(
+            model=CHAT_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are conservatively reviewing an already-formed executive "
+                        "HR answer against retrieved internal research. Preserve the "
+                        "answer's independent judgment unless the research materially "
+                        "improves it."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            temperature=0.1,
+            max_tokens=MAX_ANSWER_TOKENS,
+        )
+    )
+
+    _log_timing(
+        "Research review",
+        started
+    )
+
+    final_answer = (
+        response
+        .choices[0]
+        .message
+        .content
+        or ""
+    ).strip()
+
+    print(
+        "[RESEARCH-REVIEWED ANSWER]\n"
+        f"{final_answer}"
+    )
+
+    return final_answer
+
+
 def generate_answer(
     question: str
 ) -> Dict[str, Any]:
@@ -2554,21 +2686,17 @@ def generate_answer(
     )
 
 
-    research_brief = (
-        _synthesize_research(
+    # V13: no separate synthesis call. Review the independent answer
+    # directly against the retrieved excerpts.
+    answer_text = (
+        _revise_draft_with_retrieved_context(
             question,
+            independent_draft,
             kb_hits
         )
     )
 
-
-    answer_text = (
-        _revise_draft_with_research(
-            question,
-            independent_draft,
-            research_brief
-        )
-    )
+    research_brief = None
 
 
     result = {
@@ -2794,34 +2922,35 @@ def generate_answer_from_messages(
     )
 
 
-    research_brief = (
-        _synthesize_research(
-            retrieval_query,
-            kb_hits
-        )
+    # V13: the same deterministic contextual question used for retrieval
+    # is also used for answer generation. This prevents a short follow-up
+    # from losing the subject of the prior exchange.
+    answering_question = (
+        retrieval_query
     )
 
-
-    conversation_messages = (
-        clean_messages[-8:]
+    print(
+        "[ANSWERING QUESTION] "
+        f"{answering_question}"
     )
 
 
     independent_draft = (
         _generate_independent_advisory_draft(
-            latest_question,
-            conversation_messages
+            answering_question
         )
     )
 
 
     answer_text = (
-        _revise_draft_with_research(
-            latest_question,
+        _revise_draft_with_retrieved_context(
+            answering_question,
             independent_draft,
-            research_brief
+            kb_hits
         )
     )
+
+    research_brief = None
 
 
     result = {
