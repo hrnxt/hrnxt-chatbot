@@ -1,7 +1,12 @@
 # chatbot.py
 # HRNXT Ask Mike
-# Faster first-turn handling + selective follow-up rewriting
-# + executive-level response style + timing logs
+# Knowledge-base upgrade:
+# - PDF + DOCX + XLSX + text-file ingestion
+# - source-type metadata
+# - more useful/diversified retrieval context
+# - executive-level response style
+# - faster first-turn handling + selective follow-up rewriting
+# - timing/retrieval logs
 
 import os
 import io
@@ -13,6 +18,7 @@ import requests
 import logging
 import threading
 import traceback
+import xml.etree.ElementTree as ET
 
 from typing import List, Dict, Any
 
@@ -80,13 +86,40 @@ DROPBOX_EXTERNAL_URL = (
 
 
 # Retrieval tuning
+#
+# We retrieve more than the old 3 x 800-character snippets, but keep
+# a firm cap so Ask Mike remains fast and focused.
 
-MAX_KB_HITS = 3
-MAX_CHARS_PER_CHUNK = 800
+MAX_KB_HITS = int(
+    os.environ.get(
+        "MAX_KB_HITS",
+        "5"
+    )
+)
+
+MAX_HITS_PER_SOURCE = int(
+    os.environ.get(
+        "MAX_HITS_PER_SOURCE",
+        "2"
+    )
+)
+
+MAX_CHARS_PER_CHUNK = int(
+    os.environ.get(
+        "MAX_CHARS_PER_CHUNK",
+        "1600"
+    )
+)
+
+MAX_CONTEXT_CHARS = int(
+    os.environ.get(
+        "MAX_CONTEXT_CHARS",
+        "8000"
+    )
+)
 
 
 # Keep Ask Mike from drifting into essays.
-# Can be overridden in Render with an environment variable.
 
 MAX_ANSWER_TOKENS = int(
     os.environ.get(
@@ -199,11 +232,21 @@ Depth and judgment:
 
 Use of evidence and HRNXT context:
 
-- Ground the answer in supplied HRNXT research when it is relevant.
+- Ground the answer in supplied HRNXT/Executive Networks research when it is relevant.
 - Do not force retrieved material into the answer if it is weakly related.
 - Never claim the supplied context says something it does not.
 - If the evidence is limited, be appropriately cautious rather than inventing support.
-- Synthesize the research into judgment rather than merely repeating it.
+- Synthesize research into judgment rather than merely repeating it.
+- Material identified as "thought_leadership" may contain curated names,
+  books, articles, and citations rather than the full underlying works.
+  Treat that material as a map to relevant thinkers and ideas, not as proof
+  that you have retrieved or read the underlying book or article.
+- Do not attribute a specific finding, statistic, conclusion, or quotation
+  to an underlying work unless that finding is actually present in the
+  supplied retrieved context.
+- When retrieved research contains a useful source name or study, you may
+  identify it briefly, but the answer should remain advisory rather than
+  becoming a literature review.
 
 For strategic questions, favor this general pattern when appropriate:
 1. State the central judgment.
@@ -356,8 +399,39 @@ def _log_timing(
     )
 
 
+def _source_type(
+    filename: str
+) -> str:
+    """
+    Tag knowledge-base files so the answer model can distinguish
+    substantive research from thought-leadership reference material.
+    """
+
+    base = os.path.basename(
+        filename or ""
+    ).lower()
+
+    if base.startswith(
+        "ask_mike_research_layer"
+    ):
+        return "research_layer"
+
+    if base.startswith(
+        "thinkers50"
+    ):
+        return "thought_leadership"
+
+    if (
+        "executive networks" in base
+        or base.startswith("en_")
+    ):
+        return "en_research"
+
+    return "knowledge_base"
+
+
 # ============================================================
-# DROPBOX INDEXING
+# DROPBOX DOWNLOAD
 # ============================================================
 
 def _download_dropbox_zip(
@@ -393,6 +467,10 @@ def _download_dropbox_zip(
     return r.content
 
 
+# ============================================================
+# FILE READERS
+# ============================================================
+
 def _read_pdf(
     b: bytes
 ) -> str:
@@ -408,10 +486,302 @@ def _read_pdf(
             ).pages
         )
 
-    except Exception:
+    except Exception as exc:
+
+        print(
+            "[WARN] PDF read failed:",
+            exc
+        )
 
         return ""
 
+
+def _read_docx(
+    b: bytes
+) -> str:
+    """
+    Read ordinary .docx text using only the Python standard library.
+
+    This intentionally avoids requiring python-docx on Render.
+    It extracts paragraphs from the main document plus common
+    note/header/footer XML parts when present.
+    """
+
+    try:
+
+        zf = zipfile.ZipFile(
+            io.BytesIO(b)
+        )
+
+        candidate_parts = [
+            name
+            for name in zf.namelist()
+            if (
+                name == "word/document.xml"
+                or name.startswith("word/header")
+                or name.startswith("word/footer")
+                or name in (
+                    "word/footnotes.xml",
+                    "word/endnotes.xml",
+                )
+            )
+            and name.endswith(".xml")
+        ]
+
+        paragraphs = []
+
+        ns = {
+            "w":
+                "http://schemas.openxmlformats.org/"
+                "wordprocessingml/2006/main"
+        }
+
+        for part_name in candidate_parts:
+
+            root = ET.fromstring(
+                zf.read(part_name)
+            )
+
+            for paragraph in root.findall(
+                ".//w:p",
+                ns
+            ):
+
+                pieces = []
+
+                for node in paragraph.iter():
+
+                    tag = (
+                        node.tag.split("}")[-1]
+                        if "}" in node.tag
+                        else node.tag
+                    )
+
+                    if (
+                        tag == "t"
+                        and node.text
+                    ):
+                        pieces.append(
+                            node.text
+                        )
+
+                    elif tag == "tab":
+                        pieces.append("\t")
+
+                    elif tag in (
+                        "br",
+                        "cr",
+                    ):
+                        pieces.append("\n")
+
+                text = "".join(
+                    pieces
+                ).strip()
+
+                if text:
+                    paragraphs.append(
+                        text
+                    )
+
+        return "\n".join(
+            paragraphs
+        )
+
+    except Exception as exc:
+
+        print(
+            "[WARN] DOCX read failed:",
+            exc
+        )
+
+        return ""
+
+
+def _read_xlsx(
+    b: bytes
+) -> str:
+    """
+    Convert ordinary XLSX cell values to tab-separated text using
+    only the standard library.
+
+    This makes the existing Trusted Sources workbook indexable.
+    The current answer path still does NOT treat this workbook as
+    substantive evidence; it remains in external_col for future use.
+    """
+
+    try:
+
+        zf = zipfile.ZipFile(
+            io.BytesIO(b)
+        )
+
+        shared_strings = []
+
+        if "xl/sharedStrings.xml" in zf.namelist():
+
+            root = ET.fromstring(
+                zf.read(
+                    "xl/sharedStrings.xml"
+                )
+            )
+
+            for si in root:
+
+                text_bits = [
+                    node.text or ""
+                    for node in si.iter()
+                    if (
+                        node.tag.split("}")[-1]
+                        == "t"
+                    )
+                ]
+
+                shared_strings.append(
+                    "".join(text_bits)
+                )
+
+        sheet_names = sorted(
+            name
+            for name in zf.namelist()
+            if (
+                name.startswith(
+                    "xl/worksheets/sheet"
+                )
+                and name.endswith(".xml")
+            )
+        )
+
+        output_lines = []
+
+        for sheet_name in sheet_names:
+
+            root = ET.fromstring(
+                zf.read(sheet_name)
+            )
+
+            output_lines.append(
+                f"[Worksheet: {os.path.basename(sheet_name)}]"
+            )
+
+            for row in root.iter():
+
+                if (
+                    row.tag.split("}")[-1]
+                    != "row"
+                ):
+                    continue
+
+                values = []
+
+                for cell in row:
+
+                    if (
+                        cell.tag.split("}")[-1]
+                        != "c"
+                    ):
+                        continue
+
+                    cell_type = cell.attrib.get(
+                        "t"
+                    )
+
+                    value = ""
+
+                    if cell_type == "inlineStr":
+
+                        text_bits = [
+                            node.text or ""
+                            for node in cell.iter()
+                            if (
+                                node.tag.split("}")[-1]
+                                == "t"
+                            )
+                        ]
+
+                        value = "".join(
+                            text_bits
+                        )
+
+                    else:
+
+                        v_node = None
+
+                        for node in cell:
+
+                            if (
+                                node.tag.split("}")[-1]
+                                == "v"
+                            ):
+                                v_node = node
+                                break
+
+                        raw_value = (
+                            v_node.text
+                            if (
+                                v_node is not None
+                                and v_node.text
+                            )
+                            else ""
+                        )
+
+                        if (
+                            cell_type == "s"
+                            and raw_value
+                        ):
+
+                            try:
+
+                                value = (
+                                    shared_strings[
+                                        int(raw_value)
+                                    ]
+                                )
+
+                            except Exception:
+
+                                value = raw_value
+
+                        else:
+
+                            value = raw_value
+
+                    values.append(
+                        value.strip()
+                    )
+
+                if any(values):
+
+                    output_lines.append(
+                        "\t".join(values)
+                    )
+
+        return "\n".join(
+            output_lines
+        )
+
+    except Exception as exc:
+
+        print(
+            "[WARN] XLSX read failed:",
+            exc
+        )
+
+        return ""
+
+
+def _read_text_file(
+    raw: bytes
+) -> str:
+
+    return raw.decode(
+        "utf-8",
+        "ignore"
+    )
+
+
+# ============================================================
+# DROPBOX ZIP EXTRACTION
+# ============================================================
 
 def _extract_zip(
     zip_bytes: bytes
@@ -433,13 +803,30 @@ def _extract_zip(
         if info.is_dir():
             continue
 
+        name = info.filename
+
+        base = os.path.basename(
+            name
+        )
+
+        # Skip common hidden/temp files.
+        if (
+            not base
+            or base.startswith("~$")
+            or base.startswith(".")
+            or "__MACOSX" in name
+        ):
+            continue
+
         raw = zf.read(
             info
         )
 
-        name = info.filename
+        lower_name = (
+            name.lower()
+        )
 
-        if name.lower().endswith(
+        if lower_name.endswith(
             ".pdf"
         ):
 
@@ -447,20 +834,73 @@ def _extract_zip(
                 raw
             )
 
+        elif lower_name.endswith(
+            ".docx"
+        ):
+
+            text = _read_docx(
+                raw
+            )
+
+        elif lower_name.endswith(
+            ".xlsx"
+        ):
+
+            text = _read_xlsx(
+                raw
+            )
+
+        elif lower_name.endswith(
+            (
+                ".txt",
+                ".md",
+                ".csv",
+                ".json",
+                ".html",
+                ".htm",
+                ".xml",
+            )
+        ):
+
+            text = _read_text_file(
+                raw
+            )
+
         else:
 
-            text = raw.decode(
-                "utf-8",
-                "ignore"
+            # Preserve the old fallback behavior for any simple
+            # text-like file types we have not explicitly listed.
+            text = _read_text_file(
+                raw
             )
 
         if text.strip():
 
             docs.append(
                 {
-                    "name": name,
-                    "text": text,
+                    "name":
+                        name,
+
+                    "text":
+                        text,
+
+                    "source_type":
+                        _source_type(
+                            name
+                        ),
                 }
+            )
+
+            print(
+                f"[INFO] Parsed: {name} "
+                f"({len(text):,} chars)"
+            )
+
+        else:
+
+            print(
+                f"[WARN] No readable text: "
+                f"{name}"
             )
 
     return docs
@@ -480,12 +920,16 @@ def _safe_upsert(
     texts = []
     metas = []
 
+    total_chunks = 0
+
     for doc in docs:
 
+        chunks = _chunk_text(
+            doc["text"]
+        )
+
         for i, chunk in enumerate(
-            _chunk_text(
-                doc["text"]
-            )
+            chunks
         ):
 
             ids.append(
@@ -505,11 +949,18 @@ def _safe_upsert(
                     "source":
                         doc["name"],
 
+                    "source_type":
+                        doc.get(
+                            "source_type",
+                            "knowledge_base"
+                        ),
+
                     "chunk":
                         i,
                 }
             )
 
+            total_chunks += 1
 
             if (
                 len(ids)
@@ -526,7 +977,6 @@ def _safe_upsert(
                 texts = []
                 metas = []
 
-
     if ids:
 
         col.upsert(
@@ -535,6 +985,12 @@ def _safe_upsert(
             metadatas=metas
         )
 
+    return total_chunks
+
+
+# ============================================================
+# BUILD / UPDATE INDEXES
+# ============================================================
 
 def build_or_update_indexes():
 
@@ -571,10 +1027,15 @@ def build_or_update_indexes():
             f"{len(kb_docs)}"
         )
 
-        _safe_upsert(
+        kb_chunks = _safe_upsert(
             kb_col,
             kb_docs,
             "kb"
+        )
+
+        print(
+            f"[INFO] KB chunks indexed: "
+            f"{kb_chunks}"
         )
 
         _log_timing(
@@ -606,10 +1067,15 @@ def build_or_update_indexes():
             f"{len(external_docs)}"
         )
 
-        _safe_upsert(
+        external_chunks = _safe_upsert(
             external_col,
             external_docs,
             "external"
+        )
+
+        print(
+            f"[INFO] External chunks indexed: "
+            f"{external_chunks}"
         )
 
         _log_timing(
@@ -693,12 +1159,45 @@ def retrieve_kb(
         time.perf_counter()
     )
 
+    try:
+
+        collection_count = (
+            kb_col.count()
+        )
+
+    except Exception:
+
+        collection_count = 0
+
+
+    if collection_count <= 0:
+
+        print(
+            "[WARN] KB retrieval requested "
+            "but collection is empty."
+        )
+
+        return []
+
+
+    # Pull extra candidates so one large document does not
+    # automatically monopolize every final retrieval slot.
+
+    candidate_count = min(
+        collection_count,
+        max(
+            MAX_KB_HITS * 3,
+            MAX_KB_HITS
+        )
+    )
+
+
     result = kb_col.query(
         query_texts=[
             query
         ],
         n_results=
-            MAX_KB_HITS
+            candidate_count
     )
 
 
@@ -718,24 +1217,145 @@ def retrieve_kb(
         )[0]
     )
 
+    distances = (
+        result
+        .get(
+            "distances",
+            [[]]
+        )[0]
+    )
 
-    hits = [
-        {
-            "text":
-                doc[
-                    :MAX_CHARS_PER_CHUNK
-                ],
 
-            "meta":
-                meta,
-        }
+    candidates = []
 
-        for doc, meta
-        in zip(
+    for index, (
+        doc,
+        meta
+    ) in enumerate(
+        zip(
             docs,
             metas
         )
-    ]
+    ):
+
+        distance = (
+            distances[index]
+            if index < len(distances)
+            else None
+        )
+
+        candidates.append(
+            {
+                "text":
+                    doc,
+
+                "meta":
+                    meta or {},
+
+                "distance":
+                    distance,
+            }
+        )
+
+
+    hits = []
+    source_counts = {}
+    context_chars = 0
+
+
+    for candidate in candidates:
+
+        source = (
+            candidate["meta"]
+            .get(
+                "source",
+                "Unknown source"
+            )
+        )
+
+        used_from_source = (
+            source_counts.get(
+                source,
+                0
+            )
+        )
+
+        if (
+            used_from_source
+            >= MAX_HITS_PER_SOURCE
+        ):
+            continue
+
+
+        text = (
+            candidate["text"]
+            or ""
+        )[
+            :MAX_CHARS_PER_CHUNK
+        ]
+
+
+        if not text.strip():
+            continue
+
+
+        remaining = (
+            MAX_CONTEXT_CHARS
+            - context_chars
+        )
+
+        if remaining <= 0:
+            break
+
+
+        if len(text) > remaining:
+            text = text[:remaining]
+
+
+        hit = {
+            "text":
+                text,
+
+            "meta":
+                candidate["meta"],
+
+            "distance":
+                candidate["distance"],
+        }
+
+
+        hits.append(
+            hit
+        )
+
+        source_counts[source] = (
+            used_from_source
+            + 1
+        )
+
+        context_chars += len(
+            text
+        )
+
+
+        if (
+            len(hits)
+            >= MAX_KB_HITS
+        ):
+            break
+
+
+    print(
+        "[RETRIEVAL] "
+        + " | ".join(
+            (
+                f"{hit['meta'].get('source')} "
+                f"[{hit['meta'].get('source_type')}] "
+                f"chunk={hit['meta'].get('chunk')}"
+            )
+            for hit in hits
+        )
+    )
 
 
     _log_timing(
@@ -745,6 +1365,59 @@ def retrieve_kb(
 
 
     return hits
+
+
+def _format_kb_context(
+    kb_hits: List[Dict[str, Any]]
+) -> str:
+
+    if not kb_hits:
+        return (
+            "No directly relevant internal "
+            "research was retrieved."
+        )
+
+
+    blocks = []
+
+    for hit in kb_hits:
+
+        meta = (
+            hit.get("meta")
+            or {}
+        )
+
+        source = (
+            meta.get(
+                "source",
+                "Unknown source"
+            )
+        )
+
+        source_type = (
+            meta.get(
+                "source_type",
+                "knowledge_base"
+            )
+        )
+
+        chunk = meta.get(
+            "chunk"
+        )
+
+        blocks.append(
+            (
+                f"[Source: {source} | "
+                f"Type: {source_type} | "
+                f"Chunk: {chunk}]\n"
+                f"{hit.get('text', '')}"
+            )
+        )
+
+
+    return "\n\n".join(
+        blocks
+    )
 
 
 # ============================================================
@@ -961,6 +1634,43 @@ Latest question:
 
 
 # ============================================================
+# RESULT HELPER
+# ============================================================
+
+def _public_kb_hits(
+    kb_hits: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+
+    return [
+        {
+            "source":
+                hit["meta"]
+                .get(
+                    "source"
+                ),
+
+            "source_type":
+                hit["meta"]
+                .get(
+                    "source_type"
+                ),
+
+            "chunk":
+                hit["meta"]
+                .get(
+                    "chunk"
+                ),
+
+            "text":
+                hit["text"][:700],
+        }
+
+        for hit
+        in kb_hits
+    ]
+
+
+# ============================================================
 # SINGLE-TURN ANSWER
 # ============================================================
 
@@ -1003,10 +1713,10 @@ def generate_answer(
     )
 
 
-    kb_context = "\n\n".join(
-        hit["text"]
-        for hit
-        in kb_hits
+    kb_context = (
+        _format_kb_context(
+            kb_hits
+        )
     )
 
 
@@ -1014,8 +1724,11 @@ def generate_answer(
 Question:
 {question}
 
-Relevant HRNXT research context:
+Relevant HRNXT / Executive Networks research context:
 {kb_context}
+
+Use the context when it genuinely helps answer the question.
+Do not force weakly related material into the answer.
 """
 
 
@@ -1074,28 +1787,12 @@ Relevant HRNXT research context:
         "answer":
             answer_text,
 
-        "kb_hits": [
-            {
-                "source":
-                    hit["meta"]
-                    .get(
-                        "source"
-                    ),
+        "kb_hits":
+            _public_kb_hits(
+                kb_hits
+            ),
 
-                "chunk":
-                    hit["meta"]
-                    .get(
-                        "chunk"
-                    ),
-
-                "text":
-                    hit["text"][:500],
-            }
-
-            for hit
-            in kb_hits
-        ],
-
+        # Reserved for the future trusted-source/web-search layer.
         "web_domain_snippets":
             [],
 
@@ -1181,13 +1878,6 @@ def generate_answer_from_messages(
     # --------------------------------------------------------
     # FIRST TURN FAST PATH
     # --------------------------------------------------------
-    #
-    # Your front end sends a messages array even on the
-    # very first question. Previously that caused an
-    # unnecessary LLM rewrite call.
-    #
-    # If there is only one user message, use it directly.
-    #
 
     user_message_count = sum(
         1
@@ -1252,10 +1942,10 @@ def generate_answer_from_messages(
     )
 
 
-    kb_context = "\n\n".join(
-        hit["text"]
-        for hit
-        in kb_hits
+    kb_context = (
+        _format_kb_context(
+            kb_hits
+        )
     )
 
 
@@ -1287,9 +1977,12 @@ def generate_answer_from_messages(
 
             "content":
                 (
-                    "Relevant HRNXT research context "
-                    "for the latest question:\n"
-                    f"{kb_context}"
+                    "Relevant HRNXT / Executive Networks "
+                    "research context for the latest question:\n"
+                    f"{kb_context}\n\n"
+                    "Use the context when it genuinely helps. "
+                    "Do not force weakly related material "
+                    "into the answer."
                 ),
         },
     ] + conversation_messages
@@ -1336,31 +2029,15 @@ def generate_answer_from_messages(
         "answer":
             answer_text,
 
-        "kb_hits": [
-            {
-                "source":
-                    hit["meta"]
-                    .get(
-                        "source"
-                    ),
-
-                "chunk":
-                    hit["meta"]
-                    .get(
-                        "chunk"
-                    ),
-
-                "text":
-                    hit["text"][:500],
-            }
-
-            for hit
-            in kb_hits
-        ],
+        "kb_hits":
+            _public_kb_hits(
+                kb_hits
+            ),
 
         "retrieval_query":
             retrieval_query,
 
+        # Reserved for the future trusted-source/web-search layer.
         "web_domain_snippets":
             [],
 
