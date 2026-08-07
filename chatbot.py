@@ -1,6 +1,6 @@
 # chatbot.py
 # HRNXT Ask Mike
-# Ask Mike V10: deterministic follow-up context + independent executive judgment + research relevance gate
+# Ask Mike V11: structured research support/caution/judgment + independent executive judgment
 # - PDF + DOCX + XLSX + text-file ingestion
 # - source-type metadata
 # - more useful/diversified retrieval context
@@ -163,6 +163,9 @@ For substantive HR, advisory, comparative, or action-oriented questions:
 - Be pragmatic, specific, commercially aware, and willing to take a point of view.
 - When the question asks "which", "what first", "most important", or "what would you do",
   choose and defend a position rather than listing several equally weighted possibilities.
+- When the question explicitly presents a tension ("worth it or overhyped", "centralize or localize",
+  "AI or human judgment"), address both the case for and the strongest limitation before landing
+  on your recommendation.
 - Prefer two or three substantive ideas over a long framework.
 - Explain the important tradeoff, boundary condition, execution risk, or
   organizational implication when it matters.
@@ -1637,8 +1640,9 @@ def _synthesize_research(
 
         specificity_instruction = (
             "Do NOT repeat precise statistics, percentages, dates, forecasts, "
-            "market-size figures, or regulatory details. Translate them into "
-            "durable qualitative implications instead."
+            "market-size figures, named laws, named regulations, citation names, "
+            "or named studies. Translate them into durable qualitative implications "
+            "instead unless the user explicitly requested evidence or sources."
         )
 
 
@@ -1663,14 +1667,30 @@ FIRST apply a hard relevance test:
 If the answer is NO, return exactly:
 NO_MATERIAL_RESEARCH
 
-Otherwise return 1 to 3 concise bullets containing only the strongest findings
-or principles that materially improve the answer. Do not include a bullet just
-because it appeared in retrieval.
+Otherwise use this compact structure, including only sections that are genuinely supported:
+
+SUPPORT:
+- 1 or 2 concise durable findings or principles the research supports.
+
+CAUTION:
+- 0 to 2 concise limitations, tradeoffs, risks, boundary conditions, or reasons
+  not to overgeneralize the research.
+
+JUDGMENT:
+- What remains a leadership choice, context-dependent decision, or unresolved
+  question rather than something the research itself determines.
 
 Rules:
+- Do not force all three sections if the evidence does not support them.
+- SUPPORT should not merely restate the user's premise.
+- CAUTION is especially important for questions that ask whether something is
+  "worth it", "overhyped", "best", "most likely", "what first", or otherwise invite
+  a tradeoff or prioritization judgment.
+- JUDGMENT should preserve room for executive reasoning; do not make the final
+  recommendation on the answering model's behalf.
 - Answer relevance outranks novelty. Interesting adjacent research should be discarded.
 - Respect singular questions. If the user asks for the single most important thing,
-  synthesize toward one defensible central judgment rather than listing several themes.
+  synthesize around one central issue rather than listing several unrelated themes.
 - Distinguish direct evidence from analogy.
 - A finding from one occupation/function/use case does not prove the same effect elsewhere.
 - When evidence is indirect, state the transferable principle rather than pretending
@@ -2371,10 +2391,16 @@ Question:
 Research synthesis:
 {("No research finding materially sharpened the answer." if research_brief == "NO_MATERIAL_RESEARCH" else (research_brief or "No research finding materially sharpened the answer."))}
 
-Make your own best judgment about the user's question. Use the synthesis only
-when it genuinely sharpens, challenges, qualifies, or makes that judgment more
-specific. Answer the question itself, not the research brief. Do not quote precise
-static-research statistics unless the user explicitly asked for evidence/data/sources.
+Make your own best judgment about the user's question.
+
+Treat SUPPORT as evidence that may strengthen the answer.
+Treat CAUTION as a reason to add nuance, boundaries, or a counterargument.
+Treat JUDGMENT as a reminder that the research does not decide the issue for you.
+
+Use the synthesis only when it genuinely sharpens, challenges, qualifies, or makes
+your judgment more specific. Answer the question itself, not the research brief.
+Do not quote precise static-research statistics, named studies, citation names,
+or regulatory details unless the user explicitly asked for evidence/data/sources.
 """
 
 
@@ -2686,10 +2712,14 @@ def generate_answer_from_messages(
                     "Research synthesis for the latest question:\n"
                     f"{('No research finding materially sharpened the answer.' if research_brief == 'NO_MATERIAL_RESEARCH' else (research_brief or 'No research finding materially sharpened the answer.'))}\n\n"
                     "Make your own best judgment about the latest question. "
-                    "Use this synthesis only when it genuinely sharpens, challenges, "
+                    "Treat SUPPORT as evidence, CAUTION as a reason to add nuance "
+                    "or a counterargument, and JUDGMENT as a reminder that the "
+                    "research does not decide the issue for you. "
+                    "Use the synthesis only when it genuinely sharpens, challenges, "
                     "qualifies, or makes that judgment more specific. "
-                    "Do not quote precise static-research statistics unless "
-                    "the user explicitly asked for evidence/data/sources."
+                    "Do not quote precise static-research statistics, named studies, "
+                    "citation names, or regulatory details unless the user explicitly "
+                    "asked for evidence/data/sources."
                 ),
         },
     ] + conversation_messages
