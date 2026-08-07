@@ -1,6 +1,6 @@
 # chatbot.py
 # HRNXT Ask Mike
-# Ask Mike V8: routed direct answers + research synthesis + evidence-level chunking
+# Ask Mike V9: contextual follow-ups + research relevance gate + selective thought leadership
 # - PDF + DOCX + XLSX + text-file ingestion
 # - source-type metadata
 # - more useful/diversified retrieval context
@@ -1505,6 +1505,82 @@ def _request_needs_research(
     return True
 
 
+def _question_wants_thought_leadership(
+    question: str
+) -> bool:
+    """
+    Thinkers50 files are citation maps / thought-leadership references,
+    not the default evidence base. Use them only when the user is
+    explicitly asking about thinkers, authors, books, frameworks,
+    sources, or who to read/follow.
+    """
+
+    q = (
+        question
+        or ""
+    ).lower()
+
+    patterns = [
+        r"\bthinkers?50\b",
+        r"\bthought leader",
+        r"\bthought leadership\b",
+        r"\bmanagement thinker",
+        r"\bauthors?\b",
+        r"\bbooks?\b",
+        r"\barticles?\b",
+        r"\bframeworks?\b",
+        r"\bwho should i read\b",
+        r"\bwho should we read\b",
+        r"\bwho should i follow\b",
+        r"\bwho should we follow\b",
+        r"\bwho writes about\b",
+        r"\bwhose work\b",
+        r"\bwhat should i read\b",
+        r"\brecommended reading\b",
+    ]
+
+    return any(
+        re.search(pattern, q)
+        for pattern
+        in patterns
+    )
+
+
+def _filter_hits_for_question(
+    question: str,
+    kb_hits: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """
+    Keep substantive research layers for ordinary Ask Mike questions.
+    Thought-leadership citation files only participate when the user's
+    question actually calls for them.
+    """
+
+    if _question_wants_thought_leadership(
+        question
+    ):
+        return kb_hits
+
+    filtered = [
+        hit
+        for hit
+        in kb_hits
+        if (
+            hit.get("meta", {})
+            .get("source_type")
+            != "thought_leadership"
+        )
+    ]
+
+    if len(filtered) != len(kb_hits):
+        print(
+            f"[RETRIEVAL FILTER] removed_thought_leadership="
+            f"{len(kb_hits) - len(filtered)}"
+        )
+
+    return filtered
+
+
 def _synthesize_research(
     question: str,
     kb_hits: List[Dict[str, Any]]
@@ -1562,10 +1638,22 @@ Retrieved research excerpts:
 
 Create a compact research brief for another model that will answer the user.
 
-Return 2 to 4 concise bullets containing only the findings or principles that
-most materially change, sharpen, complicate, or constrain the obvious answer.
+FIRST apply a hard relevance test:
+- Does the retrieved material directly help answer the user's actual question?
+- Does it materially change, sharpen, qualify, or constrain the answer?
+- Is it more than merely interesting or topically adjacent?
+
+If the answer is NO, return exactly:
+NO_MATERIAL_RESEARCH
+
+Otherwise return 1 to 3 concise bullets containing only the strongest findings
+or principles that materially improve the answer. Do not include a bullet just
+because it appeared in retrieval.
 
 Rules:
+- Answer relevance outranks novelty. Interesting adjacent research should be discarded.
+- Respect singular questions. If the user asks for the single most important thing,
+  synthesize toward one defensible central judgment rather than listing several themes.
 - Distinguish direct evidence from analogy.
 - A finding from one occupation/function/use case does not prove the same effect elsewhere.
 - When evidence is indirect, state the transferable principle rather than pretending
@@ -1635,6 +1723,11 @@ Return only the brief bullets.
         print(
             f"[SYNTHESIS] chars={len(synthesis)} "
             f"evidence_request={allow_specifics}"
+        )
+
+        print(
+            "[SYNTHESIS OUTPUT]\n"
+            f"{synthesis}"
         )
 
 
@@ -2118,6 +2211,11 @@ def generate_answer(
         question
     )
 
+    kb_hits = _filter_hits_for_question(
+        question,
+        kb_hits
+    )
+
 
     source_types = {}
 
@@ -2172,7 +2270,7 @@ Question:
 {question}
 
 Research synthesis:
-{research_brief or "No research finding materially sharpened the answer."}
+{("No research finding materially sharpened the answer." if research_brief == "NO_MATERIAL_RESEARCH" else (research_brief or "No research finding materially sharpened the answer."))}
 
 Use the synthesis only when it genuinely helps. Answer the question itself,
 not the research brief. Do not quote precise static-research statistics unless
@@ -2382,38 +2480,32 @@ def generate_answer_from_messages(
     # FOLLOW-UP RETRIEVAL QUERY
     # --------------------------------------------------------
 
-    if _needs_followup_rewrite(
-        clean_messages
-    ):
+    print(
+        "[FOLLOW-UP] "
+        "Contextualizing retrieval query "
+        "from conversation"
+    )
 
-        print(
-            "[FOLLOW-UP] "
-            "Context-dependent question: "
-            "using retrieval rewrite"
-        )
-
-        retrieval_query = (
-            _rewrite_retrieval_query(
-                clean_messages,
-                latest_question
-            )
-        )
-
-    else:
-
-        print(
-            "[FOLLOW-UP] "
-            "Question appears standalone: "
-            "skipping retrieval rewrite"
-        )
-
-        retrieval_query = (
+    retrieval_query = (
+        _rewrite_retrieval_query(
+            clean_messages,
             latest_question
         )
+    )
+
+    print(
+        "[FOLLOW-UP QUERY] "
+        f"{retrieval_query}"
+    )
 
 
     kb_hits = retrieve_kb(
         retrieval_query
+    )
+
+    kb_hits = _filter_hits_for_question(
+        latest_question,
+        kb_hits
     )
 
 
@@ -2492,7 +2584,7 @@ def generate_answer_from_messages(
             "content":
                 (
                     "Research synthesis for the latest question:\n"
-                    f"{research_brief or 'No research finding materially sharpened the answer.'}\n\n"
+                    f"{('No research finding materially sharpened the answer.' if research_brief == 'NO_MATERIAL_RESEARCH' else (research_brief or 'No research finding materially sharpened the answer.'))}\n\n"
                     "Use this synthesis only when it genuinely helps. "
                     "Do not quote precise static-research statistics unless "
                     "the user explicitly asked for evidence/data/sources."
