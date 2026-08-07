@@ -2447,7 +2447,7 @@ def _revise_draft_with_retrieved_context(
         return draft
 
     allow_specifics = (
-        _question_requests_evidence(
+        _is_explicit_evidence_request(
             answering_question
         )
     )
