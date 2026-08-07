@@ -1,6 +1,6 @@
 # chatbot.py
 # HRNXT Ask Mike
-# Knowledge-base + research-grounded generation upgrade:
+# Knowledge-base + research-grounded generation + evidence-level chunking upgrade:
 # - PDF + DOCX + XLSX + text-file ingestion
 # - source-type metadata
 # - more useful/diversified retrieval context
@@ -87,8 +87,10 @@ DROPBOX_EXTERNAL_URL = (
 
 # Retrieval tuning
 #
-# We retrieve more than the old 3 x 800-character snippets, but keep
-# a firm cap so Ask Mike remains fast and focused.
+# Use smaller, more evidence-level chunks so semantic retrieval can
+# surface a specific study/finding rather than a broad multi-topic block.
+# Retrieved chunks are then passed essentially whole to the answer model,
+# subject to a modest overall context cap.
 
 MAX_KB_HITS = int(
     os.environ.get(
@@ -107,14 +109,14 @@ MAX_HITS_PER_SOURCE = int(
 MAX_CHARS_PER_CHUNK = int(
     os.environ.get(
         "MAX_CHARS_PER_CHUNK",
-        "1600"
+        "2600"
     )
 )
 
 MAX_CONTEXT_CHARS = int(
     os.environ.get(
         "MAX_CONTEXT_CHARS",
-        "8000"
+        "10000"
     )
 )
 
@@ -355,7 +357,7 @@ _enc = tiktoken.get_encoding(
 
 def _chunk_text(
     text: str,
-    max_tokens: int = 700
+    max_tokens: int = 400
 ) -> List[str]:
 
     toks = _enc.encode(
@@ -1021,6 +1023,14 @@ def build_or_update_indexes():
         f"{chroma_mode}"
     )
 
+    print(
+        "[INFO] Retrieval config: "
+        "chunk_tokens=400 "
+        f"max_hits={MAX_KB_HITS} "
+        f"max_chars_per_chunk={MAX_CHARS_PER_CHUNK} "
+        f"max_context_chars={MAX_CONTEXT_CHARS}"
+    )
+
 
     if DROPBOX_KB_URL:
 
@@ -1200,6 +1210,8 @@ def retrieve_kb(
 
     # Pull extra candidates so one large document does not
     # automatically monopolize every final retrieval slot.
+    # Because chunks are smaller (~400 tokens), each candidate should
+    # represent a more specific study, finding, or idea.
 
     candidate_count = min(
         collection_count,
