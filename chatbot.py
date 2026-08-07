@@ -1,6 +1,6 @@
 # chatbot.py
 # HRNXT Ask Mike
-# Ask Mike V7: adaptive response style + evidence-disciplined generation + evidence-level chunking
+# Ask Mike V8: routed direct answers + research synthesis + evidence-level chunking
 # - PDF + DOCX + XLSX + text-file ingestion
 # - source-type metadata
 # - more useful/diversified retrieval context
@@ -18,6 +18,7 @@ import requests
 import logging
 import threading
 import traceback
+from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 
 from typing import List, Dict, Any
@@ -148,98 +149,44 @@ UPSERT_BATCH_SIZE = 64
 ASK_MIKE_SYSTEM_PROMPT = """
 You are Ask Mike, an HR adviser for senior HR leaders.
 
-Your first job is to answer the kind of question the user actually asked.
-Do not force every response into an executive-advisory format.
+Match the answer to the question actually asked.
 
-Silently identify the request type before answering:
+For simple factual questions:
+- Answer directly and concisely.
+- Do not add strategy, tensions, frameworks, recommendations, pilots, surveys,
+  governance, or next steps unless the user asks for them.
+- Do not turn a basic fact into an executive-advisory answer.
 
-- Factual: asks for a fact, date, age, definition, identity, number, or direct explanation.
-- Explanatory: asks how or why something works.
-- Advisory: asks what a leader should do, prioritize, decide, change, or avoid.
-- Comparative: asks which option is better, what differs, or how alternatives compare.
-- Action-oriented: asks for a plan, framework, checklist, sequence, or implementation approach.
-
-Match the response to that request type.
-
-For factual questions:
-- Answer the fact directly in the first sentence.
-- Keep the answer concise unless the user asks for more detail.
-- Do not manufacture strategic implications, tensions, executive debate questions,
-  recommendations, pilots, frameworks, or next steps.
-- Do not turn a simple factual question into HR advice.
-
-For explanatory questions:
-- Explain the concept directly and clearly.
-- Add implications only when they materially help answer the question.
-- Do not append a next step unless the user is clearly asking what to do.
-
-For advisory, comparative, or action-oriented questions:
+For substantive HR, advisory, comparative, or action-oriented questions:
 - Respond like a thoughtful, experienced peer to a CHRO or senior HR executive.
-- Lead with the most useful judgment or recommendation.
-- Be commercially aware, pragmatic, specific, and willing to take a point of view.
-- Prefer two or three substantive ideas over a long generic framework.
-- Explain tradeoffs, decision rights, sequencing, governance, execution risks,
-  or organizational implications when they matter.
-- State what would change the recommendation when context is important.
+- Lead with the most useful judgment.
+- Be pragmatic, specific, commercially aware, and willing to take a point of view.
+- Prefer two or three substantive ideas over a long framework.
+- Explain the important tradeoff, boundary condition, execution risk, or
+  organizational implication when it matters.
 - Give a practical next move only when it genuinely advances the answer.
   A next step is optional, not mandatory.
 
 Style:
-- Write for experienced HR leaders, not beginners, unless the question is plainly basic/factual.
-- Use plain English.
-- Prefer short paragraphs.
+- Use plain English and short paragraphs.
 - Do not restate the user's question.
-- Avoid consultant filler such as:
-  "There are several factors to consider,"
-  "A balanced approach is needed,"
-  "It's important to,"
-  "Organizations should focus on,"
-  "In today's rapidly changing environment,"
-  "engage in a structured dialogue,"
-  or "convene a cross-functional team"
-  unless that action is genuinely the most useful recommendation.
-- Do not automatically create headings, bullets, frameworks, debate questions,
+- Avoid generic consultant filler.
+- Do not automatically create headings, bullets, debate questions, frameworks,
   pilots, surveys, metrics, governance structures, or next steps.
-- Do not end every answer with a recommendation.
 - Do not create artificial tension when the question has a straightforward answer.
 
-Use of retrieved research:
-- Retrieved HRNXT / Executive Networks context should sharpen the answer when it is relevant.
-- Use research for durable insights, patterns, tensions, frameworks, and implications.
-- Do not merely add research terminology to an answer you would have given anyway.
-- Silently ask: what does the retrieved evidence materially change, sharpen,
-  complicate, or make more specific about the obvious answer?
-- When it changes the answer, reflect that difference in the judgment or explanation.
-- When it does not materially help, do not force it in.
+Research use:
+- When a research synthesis is supplied, use it to materially sharpen the answer.
+- Prefer durable insights and implications over precise statistics from static research.
+- Do not treat analogous evidence as direct proof.
+- Never invent support or claim the research says something it does not.
+- Material labeled thought_leadership may be a bibliography or map to ideas rather
+  than the full underlying work; do not pretend you have read an underlying source
+  unless its content is actually present.
 
-Evidence discipline:
-- Treat the static knowledge base as background research, not automatically current data.
-- Do not volunteer precise statistics, percentages, dates, forecasts, market-size figures,
-  or regulatory details from the static knowledge base unless the user explicitly asks
-  for evidence, data, citations, sources, or a research-based answer.
-- Prefer the durable implication of a finding over repeating its exact number.
-- If the user explicitly requests evidence from the stored research, you may provide it,
-  while making clear that it comes from the retrieved research and may not be the latest available data.
-- Distinguish direct evidence from analogy.
-- A finding from one occupation, company, geography, function, or use case does not prove
-  the same effect in another.
-- When generalizing from adjacent evidence, transfer only the principle actually supported.
-- For questions asking "where", "which", "most likely", "what first", or similar prioritization,
-  identify the characteristics of the tasks or situations supported by the evidence before
-  naming specific HR applications.
-- Never invent support or claim the retrieved context says something it does not.
-
-Thought-leadership material:
-- Material labeled "thought_leadership" may contain curated names, books, articles,
-  and citations rather than the full underlying works.
-- Treat it as a map to relevant thinkers and ideas, not proof that you have retrieved
-  or read the underlying book or article.
-- Do not attribute a specific finding, statistic, conclusion, or quotation to an
-  underlying work unless that information is actually present in the retrieved context.
-
-Follow-up questions:
+Follow-ups:
 - Build on the prior conversation.
-- Do not repeat the earlier answer unnecessarily.
+- Avoid unnecessary repetition.
 - If the user asks "which one", "what first", or "what would you do", make a choice
   unless the available context genuinely prevents one.
 """
@@ -1415,6 +1362,423 @@ def _format_kb_context(
     )
 
 
+
+# ============================================================
+# REQUEST ROUTING + RESEARCH SYNTHESIS
+# ============================================================
+
+_FACTUAL_PATTERNS = [
+    r"^\s*how old\b",
+    r"^\s*when (?:is|was|did|does|do|will|are|were)\b",
+    r"^\s*who (?:is|was|are|were)\b",
+    r"^\s*where (?:is|was|are|were)\b",
+    r"^\s*what (?:is|are|was|were) (?:the )?(?:age|date|year|meaning|definition|difference between)\b",
+    r"^\s*define\b",
+    r"^\s*what does .+ mean\??\s*$",
+]
+
+_ADVISORY_OR_RESEARCH_PATTERNS = [
+    r"\bshould\b",
+    r"\bmost likely\b",
+    r"\bwhat first\b",
+    r"\bwhere should\b",
+    r"\bhow should\b",
+    r"\bwhat would you do\b",
+    r"\bwhat do you recommend\b",
+    r"\brecommend\b",
+    r"\bstrategy\b",
+    r"\bstrategic\b",
+    r"\bprioriti[sz]e\b",
+    r"\btrade-?off\b",
+    r"\bgovernance\b",
+    r"\boperating model\b",
+    r"\broadmap\b",
+    r"\bframework\b",
+    r"\bcompare\b",
+    r"\bversus\b",
+    r"\bvs\.?\b",
+    r"\bworth pursuing\b",
+    r"\boverhyped\b",
+    r"\bexpect .+ to change\b",
+]
+
+_EVIDENCE_REQUEST_PATTERNS = [
+    r"\bevidence\b",
+    r"\bdata\b",
+    r"\bstatistics?\b",
+    r"\bstudies\b",
+    r"\bresearch\b",
+    r"\bsources?\b",
+    r"\bcitations?\b",
+    r"\baccording to\b",
+]
+
+
+def _current_date_string() -> str:
+    """
+    Supply the model with an explicit current date for time-sensitive
+    factual questions. UTC avoids depending on Render's local timezone.
+    """
+
+    return (
+        datetime.now(timezone.utc)
+        .strftime("%B %-d, %Y")
+    )
+
+
+def _is_explicit_evidence_request(
+    question: str
+) -> bool:
+
+    q = (
+        question
+        or ""
+    ).lower()
+
+    return any(
+        re.search(pattern, q)
+        for pattern
+        in _EVIDENCE_REQUEST_PATTERNS
+    )
+
+
+def _request_needs_research(
+    question: str
+) -> bool:
+    """
+    Low-cost routing heuristic.
+
+    Obvious factual questions skip retrieval entirely.
+    Advisory, prioritization, comparative, and research-oriented
+    questions use the Ask Mike research pipeline.
+
+    Ambiguous questions default to the research path because Ask Mike's
+    primary job is substantive HR guidance.
+    """
+
+    q = (
+        question
+        or ""
+    ).strip().lower()
+
+
+    if any(
+        re.search(pattern, q)
+        for pattern
+        in _ADVISORY_OR_RESEARCH_PATTERNS
+    ):
+        return True
+
+
+    if any(
+        re.search(pattern, q)
+        for pattern
+        in _EVIDENCE_REQUEST_PATTERNS
+    ):
+        return True
+
+
+    if any(
+        re.search(pattern, q)
+        for pattern
+        in _FACTUAL_PATTERNS
+    ):
+        return False
+
+
+    # Very short "what is X?" / "what are X?" questions are usually
+    # definitional rather than requests for strategic advice.
+    if (
+        len(q.split()) <= 10
+        and re.match(
+            r"^\s*what (?:is|are)\b",
+            q
+        )
+        and not re.search(
+            r"\b(best|most|better|important|critical|effective)\b",
+            q
+        )
+    ):
+        return False
+
+
+    return True
+
+
+def _synthesize_research(
+    question: str,
+    kb_hits: List[Dict[str, Any]]
+) -> str:
+    """
+    Convert raw retrieved excerpts into a compact evidence brief before
+    final answer generation. This gives gpt-4o-mini a much easier task:
+    identify what the evidence actually changes before writing advice.
+    """
+
+    if not kb_hits:
+        return ""
+
+
+    _ensure_client()
+
+
+    kb_context = (
+        _format_kb_context(
+            kb_hits
+        )
+    )
+
+
+    allow_specifics = (
+        _is_explicit_evidence_request(
+            question
+        )
+    )
+
+
+    if allow_specifics:
+
+        specificity_instruction = (
+            "The user explicitly asked for evidence/data/sources. "
+            "You may preserve useful specific findings from the excerpts, "
+            "but do not invent anything and note when evidence is indirect."
+        )
+
+    else:
+
+        specificity_instruction = (
+            "Do NOT repeat precise statistics, percentages, dates, forecasts, "
+            "market-size figures, or regulatory details. Translate them into "
+            "durable qualitative implications instead."
+        )
+
+
+    prompt = f"""
+User question:
+{question}
+
+Retrieved research excerpts:
+{kb_context}
+
+Create a compact research brief for another model that will answer the user.
+
+Return 2 to 4 concise bullets containing only the findings or principles that
+most materially change, sharpen, complicate, or constrain the obvious answer.
+
+Rules:
+- Distinguish direct evidence from analogy.
+- A finding from one occupation/function/use case does not prove the same effect elsewhere.
+- When evidence is indirect, state the transferable principle rather than pretending
+  the user's exact application was tested.
+- For "where", "which", "most likely", or "what first" questions, identify the
+  characteristics of the tasks/situations supported by the evidence before mapping
+  them to HR applications.
+- Exclude generic HR advice that is not actually sharpened by the excerpts.
+- Do not recommend a pilot, governance framework, survey, or next step unless the
+  evidence itself makes that recommendation materially important.
+- {specificity_instruction}
+
+Return only the brief bullets.
+"""
+
+
+    started = (
+        time.perf_counter()
+    )
+
+
+    try:
+
+        response = (
+            client
+            .chat.completions
+            .create(
+                model=CHAT_MODEL,
+
+                messages=[
+                    {
+                        "role":
+                            "system",
+
+                        "content":
+                            (
+                                "Extract the strongest decision-relevant "
+                                "implications from retrieved HR research. "
+                                "Be concise and evidence-disciplined."
+                            ),
+                    },
+                    {
+                        "role":
+                            "user",
+
+                        "content":
+                            prompt,
+                    },
+                ],
+
+                temperature=0,
+
+                max_tokens=220,
+            )
+        )
+
+
+        synthesis = (
+            response
+            .choices[0]
+            .message
+            .content
+            or ""
+        ).strip()
+
+
+        print(
+            f"[SYNTHESIS] chars={len(synthesis)} "
+            f"evidence_request={allow_specifics}"
+        )
+
+
+        return synthesis
+
+
+    except Exception as exc:
+
+        print(
+            "[WARN] Research synthesis failed:",
+            exc
+        )
+
+        return ""
+
+
+    finally:
+
+        _log_timing(
+            "Research synthesis",
+            started
+        )
+
+
+def _generate_direct_answer(
+    question: str,
+    conversation_messages: List[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """
+    Fast path for straightforward factual/explanatory questions.
+    No KB retrieval, no executive-advisory scaffolding.
+    """
+
+    _ensure_client()
+
+
+    current_date = (
+        _current_date_string()
+    )
+
+
+    direct_system = f"""
+You are Ask Mike.
+
+Current date: {current_date}.
+
+Answer the user's straightforward factual or explanatory question directly.
+
+- Give the answer in the first sentence.
+- Be concise unless the user asks for detail.
+- Do not add HR strategy, executive implications, tensions, recommendations,
+  pilots, surveys, frameworks, governance, or next steps unless explicitly requested.
+- For age/date questions, calculate relative to the current date supplied above.
+- If a fact depends on an uncertain convention or definition, state the convention briefly.
+"""
+
+
+    messages = [
+        {
+            "role":
+                "system",
+
+            "content":
+                direct_system,
+        }
+    ]
+
+
+    if conversation_messages:
+
+        messages += (
+            conversation_messages[-8:]
+        )
+
+    else:
+
+        messages.append(
+            {
+                "role":
+                    "user",
+
+                "content":
+                    question,
+            }
+        )
+
+
+    started = (
+        time.perf_counter()
+    )
+
+
+    response = (
+        client
+        .chat.completions
+        .create(
+            model=CHAT_MODEL,
+
+            messages=
+                messages,
+
+            temperature=0.1,
+
+            max_tokens=250,
+        )
+    )
+
+
+    _log_timing(
+        "Direct answer generation",
+        started
+    )
+
+
+    answer_text = (
+        response
+        .choices[0]
+        .message
+        .content
+        or ""
+    ).strip()
+
+
+    return {
+        "answer":
+            answer_text,
+
+        "kb_hits":
+            [],
+
+        "route":
+            "direct",
+
+        "web_domain_snippets":
+            [],
+
+        "web_people_snippets":
+            [],
+
+        "g_tags":
+            [],
+    }
+
+
 # ============================================================
 # ANSWER CACHE
 # ============================================================
@@ -1687,8 +2051,30 @@ def generate_answer(
     ).strip()
 
 
+    needs_research = (
+        _request_needs_research(
+            question
+        )
+    )
+
+
+    print(
+        f"[ROUTE] "
+        f"{'research' if needs_research else 'direct'}"
+    )
+
+
+    # Include route + current date in cache key so a factual answer
+    # involving "now" cannot silently survive across dates.
+    cache_date = (
+        _current_date_string()
+        if not needs_research
+        else "research"
+    )
+
     qkey = (
-        question.lower()
+        f"{cache_date}:"
+        f"{question.lower()}"
     )
 
 
@@ -1703,33 +2089,81 @@ def generate_answer(
         )
 
 
+    if not needs_research:
+
+        result = (
+            _generate_direct_answer(
+                question
+            )
+        )
+
+        _cache_result(
+            qkey,
+            result
+        )
+
+        _log_timing(
+            "Total direct request",
+            started_total
+        )
+
+        return result
+
+
+    # --------------------------------------------------------
+    # RESEARCH PATH
+    # --------------------------------------------------------
+
     kb_hits = retrieve_kb(
         question
     )
 
 
-    kb_context = (
-        _format_kb_context(
-            kb_hits
-        )
-    )
-
-
     source_types = {}
+
     for hit in kb_hits:
+
         source_type = (
             hit.get("meta", {})
-            .get("source_type", "knowledge_base")
+            .get(
+                "source_type",
+                "knowledge_base"
+            )
         )
+
         source_types[source_type] = (
-            source_types.get(source_type, 0)
+            source_types.get(
+                source_type,
+                0
+            )
             + 1
         )
 
+
+    raw_context_chars = sum(
+        len(
+            hit.get(
+                "text",
+                ""
+            )
+        )
+        for hit
+        in kb_hits
+    )
+
+
     print(
         f"[GROUNDING] hits={len(kb_hits)} "
-        f"context_chars={len(kb_context)} "
+        f"raw_context_chars={raw_context_chars} "
         f"source_types={source_types}"
+    )
+
+
+    research_brief = (
+        _synthesize_research(
+            question,
+            kb_hits
+        )
     )
 
 
@@ -1737,14 +2171,12 @@ def generate_answer(
 Question:
 {question}
 
-Relevant HRNXT / Executive Networks research context:
-{kb_context}
+Research synthesis:
+{research_brief or "No research finding materially sharpened the answer."}
 
-Use this research only when it materially improves the answer.
-Prefer durable implications over exact numbers from this static knowledge base.
-Do not treat analogous evidence as direct proof.
-For simple factual questions, answer the fact directly and do not add strategy
-or next steps unless the user asks for them.
+Use the synthesis only when it genuinely helps. Answer the question itself,
+not the research brief. Do not quote precise static-research statistics unless
+the user explicitly asked for evidence/data/sources.
 """
 
 
@@ -1808,7 +2240,12 @@ or next steps unless the user asks for them.
                 kb_hits
             ),
 
-        # Reserved for the future trusted-source/web-search layer.
+        "research_synthesis":
+            research_brief,
+
+        "route":
+            "research",
+
         "web_domain_snippets":
             [],
 
@@ -1827,7 +2264,7 @@ or next steps unless the user asks for them.
 
 
     _log_timing(
-        "Total single-turn request",
+        "Total research request",
         started_total
     )
 
@@ -1891,10 +2328,6 @@ def generate_answer_from_messages(
     )
 
 
-    # --------------------------------------------------------
-    # FIRST TURN FAST PATH
-    # --------------------------------------------------------
-
     user_message_count = sum(
         1
         for m
@@ -1907,12 +2340,42 @@ def generate_answer_from_messages(
 
         print(
             "[FAST PATH] "
-            "First turn: skipping retrieval rewrite"
+            "First turn: routing normally"
         )
 
         return generate_answer(
             latest_question
         )
+
+
+    needs_research = (
+        _request_needs_research(
+            latest_question
+        )
+    )
+
+
+    print(
+        f"[ROUTE] followup_"
+        f"{'research' if needs_research else 'direct'}"
+    )
+
+
+    if not needs_research:
+
+        result = (
+            _generate_direct_answer(
+                latest_question,
+                clean_messages
+            )
+        )
+
+        _log_timing(
+            "Total direct follow-up",
+            started_total
+        )
+
+        return result
 
 
     # --------------------------------------------------------
@@ -1949,41 +2412,59 @@ def generate_answer_from_messages(
         )
 
 
-    # --------------------------------------------------------
-    # RETRIEVAL
-    # --------------------------------------------------------
-
     kb_hits = retrieve_kb(
         retrieval_query
     )
 
 
-    kb_context = (
-        _format_kb_context(
+    source_types = {}
+
+    for hit in kb_hits:
+
+        source_type = (
+            hit.get("meta", {})
+            .get(
+                "source_type",
+                "knowledge_base"
+            )
+        )
+
+        source_types[source_type] = (
+            source_types.get(
+                source_type,
+                0
+            )
+            + 1
+        )
+
+
+    raw_context_chars = sum(
+        len(
+            hit.get(
+                "text",
+                ""
+            )
+        )
+        for hit
+        in kb_hits
+    )
+
+
+    print(
+        f"[GROUNDING] followup_hits={len(kb_hits)} "
+        f"raw_context_chars={raw_context_chars} "
+        f"source_types={source_types}"
+    )
+
+
+    research_brief = (
+        _synthesize_research(
+            retrieval_query,
             kb_hits
         )
     )
 
 
-    source_types = {}
-    for hit in kb_hits:
-        source_type = (
-            hit.get("meta", {})
-            .get("source_type", "knowledge_base")
-        )
-        source_types[source_type] = (
-            source_types.get(source_type, 0)
-            + 1
-        )
-
-    print(
-        f"[GROUNDING] followup_hits={len(kb_hits)} "
-        f"context_chars={len(kb_context)} "
-        f"source_types={source_types}"
-    )
-
-
-    # Keep a reasonable amount of history.
     conversation_messages = (
         clean_messages[-8:]
     )
@@ -2000,9 +2481,8 @@ def generate_answer_from_messages(
                     +
                     "\n\n"
                     "This is a continuing conversation. "
-                    "Use prior messages to understand "
-                    "the user's context and avoid "
-                    "repeating information unnecessarily."
+                    "Use prior messages to understand context "
+                    "and avoid repetition."
                 ),
         },
         {
@@ -2011,15 +2491,11 @@ def generate_answer_from_messages(
 
             "content":
                 (
-                    "Relevant HRNXT / Executive Networks "
-                    "research context for the latest question:\n"
-                    f"{kb_context}\n\n"
-                    "Use this research only when it materially improves "
-                    "the latest answer. Prefer durable implications over exact "
-                    "numbers from this static knowledge base. Do not treat "
-                    "analogous evidence as direct proof. Match the response type "
-                    "to the user's actual question and do not manufacture "
-                    "strategy or next steps for simple factual questions."
+                    "Research synthesis for the latest question:\n"
+                    f"{research_brief or 'No research finding materially sharpened the answer.'}\n\n"
+                    "Use this synthesis only when it genuinely helps. "
+                    "Do not quote precise static-research statistics unless "
+                    "the user explicitly asked for evidence/data/sources."
                 ),
         },
     ] + conversation_messages
@@ -2074,7 +2550,12 @@ def generate_answer_from_messages(
         "retrieval_query":
             retrieval_query,
 
-        # Reserved for the future trusted-source/web-search layer.
+        "research_synthesis":
+            research_brief,
+
+        "route":
+            "research",
+
         "web_domain_snippets":
             [],
 
@@ -2087,9 +2568,10 @@ def generate_answer_from_messages(
 
 
     _log_timing(
-        "Total follow-up request",
+        "Total research follow-up",
         started_total
     )
 
 
     return result
+
