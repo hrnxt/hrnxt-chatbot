@@ -1,6 +1,6 @@
 # chatbot.py
 # HRNXT Ask Mike
-# Ask Mike V11: structured research support/caution/judgment + independent executive judgment
+# Ask Mike V12: independent answer first + conservative research revision
 # - PDF + DOCX + XLSX + text-file ingestion
 # - source-type metadata
 # - more useful/diversified retrieval context
@@ -2245,6 +2245,175 @@ def _public_kb_hits(
 # SINGLE-TURN ANSWER
 # ============================================================
 
+
+def _generate_independent_advisory_draft(
+    question: str,
+    conversation_messages: List[Dict[str, str]] = None
+) -> str:
+    """
+    Generate Ask Mike's judgment before showing the model retrieved research.
+    This preserves the model's independent reasoning and prevents retrieval
+    from anchoring the initial answer.
+    """
+
+    _ensure_client()
+
+    messages = [
+        {
+            "role": "system",
+            "content": ASK_MIKE_SYSTEM_PROMPT,
+        }
+    ]
+
+    if conversation_messages:
+        messages += conversation_messages[-8:]
+    else:
+        messages.append(
+            {
+                "role": "user",
+                "content": question,
+            }
+        )
+
+    started = time.perf_counter()
+
+    response = (
+        client
+        .chat.completions
+        .create(
+            model=CHAT_MODEL,
+            messages=messages,
+            temperature=0.2,
+            max_tokens=MAX_ANSWER_TOKENS,
+        )
+    )
+
+    _log_timing(
+        "Independent advisory draft",
+        started
+    )
+
+    draft = (
+        response
+        .choices[0]
+        .message
+        .content
+        or ""
+    ).strip()
+
+    print(
+        "[INDEPENDENT DRAFT]\n"
+        f"{draft}"
+    )
+
+    return draft
+
+
+def _revise_draft_with_research(
+    question: str,
+    draft: str,
+    research_brief: str
+) -> str:
+    """
+    Research is introduced only AFTER Ask Mike has formed an independent answer.
+    Revise only when the research genuinely improves that answer.
+    """
+
+    if (
+        not research_brief
+        or research_brief == "NO_MATERIAL_RESEARCH"
+    ):
+        print(
+            "[RESEARCH REVISION] "
+            "No material research; keeping independent draft"
+        )
+        return draft
+
+    _ensure_client()
+
+    prompt = f"""
+User question:
+{question}
+
+Ask Mike's independent draft:
+{draft}
+
+Supporting research brief:
+{research_brief}
+
+Review the independent draft against the research brief.
+
+Keep the independent draft unless the research reveals something that materially
+improves it. Research is not an answer key.
+
+Revise only to:
+- correct or qualify an unsupported assumption,
+- add an important boundary condition or counterargument,
+- sharpen a recommendation,
+- or add a durable insight that materially changes what the executive should conclude.
+
+Do NOT:
+- replace a strong judgment merely because the research discusses another topic,
+- make the answer more generic,
+- add research terminology for its own sake,
+- add named studies, citations, laws, regulations, or precise static statistics
+  unless the user explicitly requested evidence,
+- add length unless the added material genuinely improves the answer.
+
+For questions presenting a tension, preserve and answer that tension.
+For "which", "what first", "most important", or "what would you do" questions,
+make a clear choice.
+
+Return only the final answer to the user.
+"""
+
+    started = time.perf_counter()
+
+    response = (
+        client
+        .chat.completions
+        .create(
+            model=CHAT_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are editing an already-formed executive HR judgment. "
+                        "Preserve its strengths. Use research conservatively and only "
+                        "when it materially improves the answer."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            temperature=0.1,
+            max_tokens=MAX_ANSWER_TOKENS,
+        )
+    )
+
+    _log_timing(
+        "Research revision",
+        started
+    )
+
+    final_answer = (
+        response
+        .choices[0]
+        .message
+        .content
+        or ""
+    ).strip()
+
+    print(
+        "[REVISED ANSWER]\n"
+        f"{final_answer}"
+    )
+
+    return final_answer
+
+
 def generate_answer(
     question: str
 ) -> Dict[str, Any]:
@@ -2376,6 +2545,15 @@ def generate_answer(
     )
 
 
+    # Form the executive judgment BEFORE exposing the answering model
+    # to retrieved research.
+    independent_draft = (
+        _generate_independent_advisory_draft(
+            question
+        )
+    )
+
+
     research_brief = (
         _synthesize_research(
             question,
@@ -2384,75 +2562,13 @@ def generate_answer(
     )
 
 
-    user_prompt = f"""
-Question:
-{question}
-
-Research synthesis:
-{("No research finding materially sharpened the answer." if research_brief == "NO_MATERIAL_RESEARCH" else (research_brief or "No research finding materially sharpened the answer."))}
-
-Make your own best judgment about the user's question.
-
-Treat SUPPORT as evidence that may strengthen the answer.
-Treat CAUTION as a reason to add nuance, boundaries, or a counterargument.
-Treat JUDGMENT as a reminder that the research does not decide the issue for you.
-
-Use the synthesis only when it genuinely sharpens, challenges, qualifies, or makes
-your judgment more specific. Answer the question itself, not the research brief.
-Do not quote precise static-research statistics, named studies, citation names,
-or regulatory details unless the user explicitly asked for evidence/data/sources.
-"""
-
-
-    generation_started = (
-        time.perf_counter()
-    )
-
-
-    response = (
-        client
-        .chat.completions
-        .create(
-            model=CHAT_MODEL,
-
-            messages=[
-                {
-                    "role":
-                        "system",
-
-                    "content":
-                        ASK_MIKE_SYSTEM_PROMPT,
-                },
-                {
-                    "role":
-                        "user",
-
-                    "content":
-                        user_prompt,
-                },
-            ],
-
-            temperature=0.2,
-
-            max_tokens=
-                MAX_ANSWER_TOKENS,
+    answer_text = (
+        _revise_draft_with_research(
+            question,
+            independent_draft,
+            research_brief
         )
     )
-
-
-    _log_timing(
-        "Final answer generation",
-        generation_started
-    )
-
-
-    answer_text = (
-        response
-        .choices[0]
-        .message
-        .content
-        or ""
-    ).strip()
 
 
     result = {
@@ -2466,6 +2582,9 @@ or regulatory details unless the user explicitly asked for evidence/data/sources
 
         "research_synthesis":
             research_brief,
+
+        "independent_draft":
+            independent_draft,
 
         "route":
             "research",
@@ -2688,78 +2807,21 @@ def generate_answer_from_messages(
     )
 
 
-    openai_messages = [
-        {
-            "role":
-                "system",
-
-            "content":
-                (
-                    ASK_MIKE_SYSTEM_PROMPT
-                    +
-                    "\n\n"
-                    "This is a continuing conversation. "
-                    "Use prior messages to understand context "
-                    "and avoid repetition."
-                ),
-        },
-        {
-            "role":
-                "user",
-
-            "content":
-                (
-                    "Research synthesis for the latest question:\n"
-                    f"{('No research finding materially sharpened the answer.' if research_brief == 'NO_MATERIAL_RESEARCH' else (research_brief or 'No research finding materially sharpened the answer.'))}\n\n"
-                    "Make your own best judgment about the latest question. "
-                    "Treat SUPPORT as evidence, CAUTION as a reason to add nuance "
-                    "or a counterargument, and JUDGMENT as a reminder that the "
-                    "research does not decide the issue for you. "
-                    "Use the synthesis only when it genuinely sharpens, challenges, "
-                    "qualifies, or makes that judgment more specific. "
-                    "Do not quote precise static-research statistics, named studies, "
-                    "citation names, or regulatory details unless the user explicitly "
-                    "asked for evidence/data/sources."
-                ),
-        },
-    ] + conversation_messages
-
-
-    generation_started = (
-        time.perf_counter()
-    )
-
-
-    response = (
-        client
-        .chat.completions
-        .create(
-            model=CHAT_MODEL,
-
-            messages=
-                openai_messages,
-
-            temperature=0.2,
-
-            max_tokens=
-                MAX_ANSWER_TOKENS,
+    independent_draft = (
+        _generate_independent_advisory_draft(
+            latest_question,
+            conversation_messages
         )
     )
 
 
-    _log_timing(
-        "Final follow-up generation",
-        generation_started
-    )
-
-
     answer_text = (
-        response
-        .choices[0]
-        .message
-        .content
-        or ""
-    ).strip()
+        _revise_draft_with_research(
+            latest_question,
+            independent_draft,
+            research_brief
+        )
+    )
 
 
     result = {
@@ -2776,6 +2838,9 @@ def generate_answer_from_messages(
 
         "research_synthesis":
             research_brief,
+
+        "independent_draft":
+            independent_draft,
 
         "route":
             "research",
