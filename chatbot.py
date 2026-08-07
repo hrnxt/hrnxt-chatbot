@@ -1,6 +1,6 @@
 # chatbot.py
 # HRNXT Ask Mike
-# Ask Mike V9: contextual follow-ups + research relevance gate + selective thought leadership
+# Ask Mike V10: deterministic follow-up context + independent executive judgment + research relevance gate
 # - PDF + DOCX + XLSX + text-file ingestion
 # - source-type metadata
 # - more useful/diversified retrieval context
@@ -159,11 +159,16 @@ For simple factual questions:
 
 For substantive HR, advisory, comparative, or action-oriented questions:
 - Respond like a thoughtful, experienced peer to a CHRO or senior HR executive.
-- Lead with the most useful judgment.
+- Lead with the most useful judgment, not a generic summary of the topic.
 - Be pragmatic, specific, commercially aware, and willing to take a point of view.
+- When the question asks "which", "what first", "most important", or "what would you do",
+  choose and defend a position rather than listing several equally weighted possibilities.
 - Prefer two or three substantive ideas over a long framework.
 - Explain the important tradeoff, boundary condition, execution risk, or
   organizational implication when it matters.
+- Preserve useful nuance: enterprise standards and local execution can coexist;
+  avoid forcing a whole HR capability into a purely centralized or decentralized box
+  when the better answer is to split decision rights within that capability.
 - Give a practical next move only when it genuinely advances the answer.
   A next step is optional, not mandatory.
 
@@ -176,7 +181,15 @@ Style:
 - Do not create artificial tension when the question has a straightforward answer.
 
 Research use:
-- When a research synthesis is supplied, use it to materially sharpen the answer.
+- Your primary job is to answer the user's question with sound executive judgment.
+- Research is supporting evidence, not a script. Do not let retrieved material replace
+  your own reasoning or pull the answer toward a merely interesting adjacent topic.
+- Form the clearest answer you can to the user's actual question, then use a supplied
+  research synthesis to sharpen, challenge, qualify, or make that judgment more specific
+  when it genuinely adds value.
+- If the synthesis does not improve the answer, leave it out.
+- When the user asks for a choice, priority, or "most important" judgment, make one.
+  Do not substitute a list of loosely related research themes.
 - Prefer durable insights and implications over precise statistics from static research.
 - Do not treat analogous evidence as direct proof.
 - Never invent support or claim the research says something it does not.
@@ -1636,7 +1649,11 @@ User question:
 Retrieved research excerpts:
 {kb_context}
 
-Create a compact research brief for another model that will answer the user.
+Create a compact supporting research brief for another model that will answer the user.
+
+The final model will make its own executive judgment. Your job is only to surface
+research that genuinely sharpens, challenges, qualifies, or makes that judgment
+more specific. Do not choose the answer on the final model's behalf.
 
 FIRST apply a hard relevance test:
 - Does the retrieved material directly help answer the user's actual question?
@@ -1870,6 +1887,88 @@ Answer the user's straightforward factual or explanatory question directly.
         "g_tags":
             [],
     }
+
+
+
+def _build_contextual_retrieval_query(
+    messages: List[Dict[str, str]],
+    latest_question: str
+) -> str:
+    """
+    Build a deterministic follow-up retrieval query from recent USER turns.
+
+    This avoids an extra model call and prevents the retrieval rewrite from
+    accidentally changing the subject of the conversation.
+
+    We intentionally favor the immediately preceding user question plus the
+    latest follow-up. If the previous user turn is itself very short/contextual,
+    include one additional earlier user turn when available.
+    """
+
+    user_messages = [
+        (
+            m.get("content")
+            or ""
+        ).strip()
+        for m
+        in messages
+        if (
+            m.get("role") == "user"
+            and m.get("content")
+        )
+    ]
+
+
+    if len(user_messages) <= 1:
+        return (
+            latest_question
+            or ""
+        ).strip()
+
+
+    latest = (
+        latest_question
+        or user_messages[-1]
+    ).strip()
+
+    previous = (
+        user_messages[-2]
+    ).strip()
+
+
+    context_parts = []
+
+
+    # If the prior user message is itself very short, include one
+    # additional earlier user message to preserve the underlying topic.
+    if (
+        len(previous.split()) <= 8
+        and len(user_messages) >= 3
+    ):
+        context_parts.append(
+            user_messages[-3]
+        )
+
+
+    context_parts.append(
+        previous
+    )
+
+    context_parts.append(
+        latest
+    )
+
+
+    query = " | ".join(
+        part
+        for part
+        in context_parts
+        if part
+    )
+
+
+    # Keep embeddings focused if a conversation becomes unusually long.
+    return query[:1200]
 
 
 # ============================================================
@@ -2272,9 +2371,10 @@ Question:
 Research synthesis:
 {("No research finding materially sharpened the answer." if research_brief == "NO_MATERIAL_RESEARCH" else (research_brief or "No research finding materially sharpened the answer."))}
 
-Use the synthesis only when it genuinely helps. Answer the question itself,
-not the research brief. Do not quote precise static-research statistics unless
-the user explicitly asked for evidence/data/sources.
+Make your own best judgment about the user's question. Use the synthesis only
+when it genuinely sharpens, challenges, qualifies, or makes that judgment more
+specific. Answer the question itself, not the research brief. Do not quote precise
+static-research statistics unless the user explicitly asked for evidence/data/sources.
 """
 
 
@@ -2482,12 +2582,12 @@ def generate_answer_from_messages(
 
     print(
         "[FOLLOW-UP] "
-        "Contextualizing retrieval query "
-        "from conversation"
+        "Building deterministic contextual "
+        "retrieval query"
     )
 
     retrieval_query = (
-        _rewrite_retrieval_query(
+        _build_contextual_retrieval_query(
             clean_messages,
             latest_question
         )
@@ -2585,7 +2685,9 @@ def generate_answer_from_messages(
                 (
                     "Research synthesis for the latest question:\n"
                     f"{('No research finding materially sharpened the answer.' if research_brief == 'NO_MATERIAL_RESEARCH' else (research_brief or 'No research finding materially sharpened the answer.'))}\n\n"
-                    "Use this synthesis only when it genuinely helps. "
+                    "Make your own best judgment about the latest question. "
+                    "Use this synthesis only when it genuinely sharpens, challenges, "
+                    "qualifies, or makes that judgment more specific. "
                     "Do not quote precise static-research statistics unless "
                     "the user explicitly asked for evidence/data/sources."
                 ),
@@ -2666,4 +2768,3 @@ def generate_answer_from_messages(
 
 
     return result
-
