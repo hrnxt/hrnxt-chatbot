@@ -2435,7 +2435,7 @@ def _revise_draft_with_retrieved_context(
         )
         return draft
 
-    research_context = _build_grounding_context(
+    research_context = _format_kb_context(
         kb_hits
     )
 
