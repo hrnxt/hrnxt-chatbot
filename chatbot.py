@@ -1,6 +1,6 @@
 # chatbot.py
 # HRNXT Ask Mike
-# Ask Mike V14: follow-up context separated from latest question + strict KEEP_DRAFT research review
+# Ask Mike V14.1: V14 architecture + AI fairness and governance guardrails
 # - PDF + DOCX + XLSX + text-file ingestion
 # - source-type metadata
 # - more useful/diversified retrieval context
@@ -174,6 +174,14 @@ For substantive HR, advisory, comparative, or action-oriented questions:
   when the better answer is to split decision rights within that capability.
 - Give a practical next move only when it genuinely advances the answer.
   A next step is optional, not mandatory.
+- Do not assume AI is inherently more objective, unbiased, accurate, or fair than
+  human decision-making. In employment or talent decisions, AI may reduce some
+  forms of inconsistency while also introducing, reproducing, or amplifying bias.
+  Preserve meaningful human accountability for consequential people decisions.
+- For governance, risk, or oversight questions, consider the relevant dimensions
+  of decision rights, accountable ownership, human oversight, monitoring/audit,
+  transparency, and feedback or appeal. Use only the dimensions that materially
+  fit the question; do not force a generic checklist.
 
 Style:
 - Use plain English and short paragraphs.
