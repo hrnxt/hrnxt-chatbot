@@ -1,6 +1,6 @@
 # chatbot.py
 # HRNXT Ask Mike
-# Ask Mike V13: contextualized answering + answer-first direct research review
+# Ask Mike V14: follow-up context separated from latest question + strict KEEP_DRAFT research review
 # - PDF + DOCX + XLSX + text-file ingestion
 # - source-type metadata
 # - more useful/diversified retrieval context
@@ -1910,6 +1910,53 @@ Answer the user's straightforward factual or explanatory question directly.
 
 
 
+
+def _build_followup_answer_context(
+    messages: List[Dict[str, str]],
+    latest_question: str
+) -> str:
+    """
+    Build a short conversational context for answer generation without
+    turning the previous question into part of the latest question.
+
+    The model receives:
+      - CONTEXT: what the conversation is about
+      - LATEST QUESTION: what to answer now
+    """
+
+    user_messages = [
+        (
+            m.get("content")
+            or ""
+        ).strip()
+        for m
+        in messages
+        if (
+            m.get("role") == "user"
+            and m.get("content")
+        )
+    ]
+
+    if len(user_messages) <= 1:
+        return ""
+
+    previous = user_messages[-2].strip()
+
+    # If the prior user turn is itself very short/contextual, include
+    # one additional earlier user turn to preserve the underlying topic.
+    if (
+        len(previous.split()) <= 8
+        and len(user_messages) >= 3
+    ):
+        earlier = user_messages[-3].strip()
+        return (
+            f"{earlier}\n"
+            f"{previous}"
+        )[:1200]
+
+    return previous[:1200]
+
+
 def _build_contextual_retrieval_query(
     messages: List[Dict[str, str]],
     latest_question: str
@@ -2477,25 +2524,36 @@ Retrieved research excerpts:
 
 Review the independent draft against the retrieved research.
 
+DEFAULT OUTCOME: KEEP_DRAFT.
+
+Return exactly KEEP_DRAFT unless the research materially improves the answer.
+
+A revision is justified ONLY if at least one of these is true:
+- the draft contains a materially unsupported or incorrect assumption;
+- directly relevant research changes the recommendation;
+- the draft misses an important risk, tradeoff, or boundary condition;
+- the research adds a distinctive insight that would materially affect what a CHRO
+  should conclude or do.
+
+Research being relevant, interesting, or supportive is NOT enough to justify a revision.
+
 IMPORTANT:
 - The independent draft is the starting judgment.
 - Research is supporting material, not an answer key.
-- Keep the draft unchanged if the excerpts do not materially improve it.
-- Ignore research that is merely adjacent, interesting, or less responsive to the
-  actual question than the draft.
+- Ignore research that is merely adjacent or less responsive to the actual question.
 - Do not introduce a new topic simply because it appears in retrieval.
 - For a question presenting a tension, preserve both the strongest case and the
   strongest limitation before landing on a judgment.
 - For "which", "what first", "most important", or "what would you do" questions,
   make a clear choice.
-- Revise only to correct an unsupported assumption, add an important counterargument
-  or boundary condition, sharpen a recommendation, or add a durable insight that
-  materially changes what the executive should conclude.
 - Preserve useful specificity and executive judgment from the draft.
 - Do not make the answer longer unless the added material genuinely improves it.
 - {specificity_rule}
 
-Return only the final answer to the user.
+If no material revision is needed, return exactly:
+KEEP_DRAFT
+
+Otherwise return only the revised final answer.
 """
 
     started = time.perf_counter()
@@ -2530,7 +2588,7 @@ Return only the final answer to the user.
         started
     )
 
-    final_answer = (
+    review_output = (
         response
         .choices[0]
         .message
@@ -2538,12 +2596,18 @@ Return only the final answer to the user.
         or ""
     ).strip()
 
+    if review_output == "KEEP_DRAFT":
+        print(
+            "[RESEARCH REVIEW] KEEP_DRAFT"
+        )
+        return draft
+
     print(
         "[RESEARCH-REVIEWED ANSWER]\n"
-        f"{final_answer}"
+        f"{review_output}"
     )
 
-    return final_answer
+    return review_output
 
 
 def generate_answer(
@@ -2922,16 +2986,33 @@ def generate_answer_from_messages(
     )
 
 
-    # V13: the same deterministic contextual question used for retrieval
-    # is also used for answer generation. This prevents a short follow-up
-    # from losing the subject of the prior exchange.
+    # V14: preserve the prior topic as context, but answer ONLY
+    # the user's latest question.
+    followup_context = (
+        _build_followup_answer_context(
+            clean_messages,
+            latest_question
+        )
+    )
+
     answering_question = (
-        retrieval_query
+        f"Conversation context:\n"
+        f"{followup_context}\n\n"
+        f"Latest question to answer:\n"
+        f"{latest_question}\n\n"
+        "Answer only the latest question. Use the context only to resolve "
+        "what the user is referring to. Do not repeat or re-answer the "
+        "previous question unless it is necessary to answer the follow-up."
     )
 
     print(
-        "[ANSWERING QUESTION] "
-        f"{answering_question}"
+        "[ANSWER CONTEXT] "
+        f"{followup_context}"
+    )
+
+    print(
+        "[LATEST QUESTION] "
+        f"{latest_question}"
     )
 
 
