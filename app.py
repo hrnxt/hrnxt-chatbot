@@ -9,6 +9,8 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "https://hrnxt.ai",
+        "https://www.hrnxt.ai",
         "https://hrnxt.co",
         "https://www.hrnxt.co",
     ],
